@@ -326,6 +326,8 @@ is created. Either way, follow `docs/INSTALL.md`; it has the steps these command
 
 ## Where it came from
 
+Questions, problems and ideas go to the repository's GitHub issues; the authors do not take them by e-mail.
+
 Byeori was built by the An Lab (github.com/joonan-lab) to replace the lab wiki it kept by hand:
 the same aim, originals read in full and knowledge kept across papers, moved into AWS so that a
 whole lab can share it. Until there is a paper, cite the repository and the version you used:
