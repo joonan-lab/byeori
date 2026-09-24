@@ -1,0 +1,284 @@
+# Installing Byeori
+
+Ten steps. Steps 1 to 6 give you a working wiki with one paper in it; 7 to 9 are optional; 10 is
+how to remove it again. Each step says what it creates, and `docs/AWS-SERVICES.md` explains the
+services by name. Run every command from the root of your clone.
+
+If you use Claude Code, open the clone and type `/byeori-install`: the agent walks through these
+same steps with you and asks before each one that creates something or costs money.
+
+## 1. Prerequisites
+
+You need:
+
+- **An AWS account** and a user in it with administrator access, set up as a profile of the AWS
+  CLI (`aws configure --profile byeori` asks for the user's access key). Check it with
+  `aws sts get-caller-identity --profile byeori`; it prints the account and the user.
+- **A region** where Bedrock offers the Claude models, for example `us-east-1`.
+- **Bedrock model access.** In the AWS console, switch to your region, open Bedrock → Model access,
+  and request access to the Claude models (Byeori's default is Claude Opus 5). Approval is usually
+  immediate. Without it every note fails; step 5 checks it.
+- **Docker**, running. `docker --version` should answer.
+- **`uv`** (`uv --version`) and **the AWS CLI** (`aws --version`).
+- **An OpenAlex API key.** Free; create one at [openalex.org](https://openalex.org). Byeori uses it
+  to look papers up and to check which paper a PDF is.
+
+Then clone and install the Python package:
+
+```bash
+git clone https://github.com/joonan-lab/byeori
+cd byeori
+uv sync
+```
+
+## 2. `byeori init`
+
+```bash
+uv run byeori init
+```
+
+It asks six questions and writes the answers to `.byeori.env` (readable only by you):
+
+1. The AWS CLI profile to use (`byeori`).
+2. The region (`us-east-1`).
+3. The name of the CloudFormation stack to create (`byeori`).
+4. The Parameter Store name that will hold your OpenAlex key (`/byeori/openalex-api-key`).
+5. A contact e-mail. It is sent to OpenAlex, Crossref and NCBI as the "polite pool" address,
+   which gets more reliable service. You may leave it empty.
+6. Whether the stack should create its own network (`true`). Say `true` unless your account
+   already has a VPC you want to use. If you say `false`, it asks for that VPC's id and a
+   comma-separated list of its public subnet ids.
+
+Every later command reads its settings from the environment, so load the file in each new
+terminal:
+
+```bash
+source .byeori.env
+```
+
+## 3. `byeori deploy`
+
+First put your OpenAlex key into Parameter Store, under the name you gave in step 2. Run this
+yourself and paste the key where it says; do not paste it into a chat with an agent:
+
+```bash
+source .byeori.env
+aws ssm put-parameter --name /byeori/openalex-api-key --type SecureString --value <your key>
+```
+
+(Sourcing the file first makes the AWS CLI use your profile and region.)
+
+`SecureString` means the value is stored encrypted. Use the name you chose if it differs.
+
+Then deploy:
+
+```bash
+source .byeori.env
+uv run byeori deploy
+```
+
+This hands `infra/template.yaml` to CloudFormation, which creates the stack: the data bucket (S3),
+the catalog table (DynamoDB), the ingest and synthesis functions (Lambda), the extraction
+cluster (Fargate), the image repository (ECR), the workflows (Step Functions), the audit trail
+(CloudTrail) and the timers (EventBridge). It takes ten to fifteen minutes. When it finishes, the
+command writes the bucket, table and ingest function names back into `.byeori.env`; run
+`source .byeori.env` again.
+
+What `CreateVpc` means: the Fargate tasks need a network with internet access, to pull their
+container images and to reach S3 and DynamoDB. With `true` (your answer in step 2)
+the stack creates a small network of its own (a VPC with two public subnets), which costs nothing
+while idle. With `false` it uses the VPC and subnets you named.
+
+Other settings can be changed by naming them after the command, as `Key=Value`. The ones you are
+most likely to want are the models (`DraftModelId`, `NoteModelId`, `NoteFallbackModelId`,
+`SynthesisModelId`, `SynthesisFallbackModelId`; all default to `global.anthropic.claude-opus-5`),
+the thinking effort (`IngestReasoning`, `SynthesisReasoning`), the spending cap per research
+question (`QuestionBudgetUsd`, 12 dollars as deployed) and the nightly index rebuild
+(`IndexRebuildSchedule`, a cron expression in UTC; empty turns it off). For example:
+
+```bash
+uv run byeori deploy NoteModelId=global.anthropic.claude-sonnet-5 IndexRebuildSchedule="cron(0 3 * * ? *)"
+```
+
+If the deploy fails, CloudFormation rolls back and leaves the previous state in place. Open
+CloudFormation → Stacks → your stack → Events in the console: the first `CREATE_FAILED` line says
+why. Fix the input and run the command again.
+
+## 4. `byeori build-workers`
+
+```bash
+uv run byeori build-workers
+```
+
+Builds the asset worker image with Docker (the program that cuts figures and tables out of a
+PDF), pushes it to the stack's ECR repository, and publishes the worker script to the bucket.
+The first build downloads several gigabytes and takes several minutes. Docker must be running.
+
+## 5. `byeori doctor`
+
+```bash
+source .byeori.env
+uv run byeori doctor
+```
+
+It prints one JSON object. Read it field by field:
+
+| Field | What it should say | If it does not |
+|---|---|---|
+| `python`, `uv` | a version, `true` | install `uv` |
+| `aws.credentials` | `true` | the profile in `.byeori.env` cannot sign in; rerun `aws configure --profile <profile>` |
+| `aws.bucket_configured`, `aws.table_configured`, `aws.ingest_function_configured` | `true` | `.byeori.env` was not sourced, or step 3 did not finish |
+| `openalex_live` | `true` | the key in Parameter Store is missing or wrong; `openalex_error` says which |
+| `bedrock` | `"ok"` for every model the stack uses | an AWS error code, usually `AccessDeniedException`: model access was not granted in this region (step 1) |
+| `openalex_api_key`, `kiro_cli` | may be `false` | not needed; the key is read in AWS, not on your computer |
+
+The command exits with an error only when `uv` or `openalex_live` fails; still read `bedrock`
+yourself, because nothing else will work without it.
+
+## 6. First paper
+
+One paper you have as a PDF. Every step runs in AWS; your computer only sends the PDF and reads
+the results. It costs roughly what `docs/COST.md` gives for one paper.
+
+Find the paper in OpenAlex and save it as a candidate. `candidate-add` prints the record,
+including its `stem`, the paper's folder name in the bucket:
+
+```bash
+source .byeori.env
+uv run byeori search "<title of the paper>" --limit 5
+uv run byeori candidate-add <OpenAlex work id, for example W1234567890>
+```
+
+Upload the PDF (the file on your computer is not moved or changed):
+
+```bash
+uv run byeori attach-pdf <OpenAlex work id> <path to the PDF>
+```
+
+Extract its text with GROBID on Fargate, and check on the task (a few minutes):
+
+```bash
+uv run byeori aws-extract --stems <stem> --tasks 1
+uv run byeori aws-extract-status
+```
+
+Have Bedrock write the evidence note from the extracted full text:
+
+```bash
+uv run byeori aws-source-note <stem>
+```
+
+It prints `"status": "source_ready"` when the note is stored under `wiki/sources/`. Then check
+every page's structure, rebuild the search index, and search:
+
+```bash
+uv run byeori validate
+uv run byeori build-index
+uv run byeori wiki-search "<a question the paper answers>"
+uv run byeori wiki-read note <stem>
+```
+
+For many papers at once, `uv run byeori aws-pipeline-stems` writes the note for every extracted
+paper that has none, in parallel, and rebuilds the index at the end.
+
+## 7. Student service (optional)
+
+A separate stack that lets lab members ask questions and read the wiki without being
+administrators. What it does and how members connect is in `docs/LAB-SERVICE.md`.
+
+It needs one KMS key, even if you never use Jev (step 8): the template gives its triage worker
+permission to decrypt the Jev key with it. Create the key once and add its ARN to `.byeori.env`:
+
+```bash
+aws kms create-key --description "byeori parameters"
+aws kms create-alias --alias-name alias/byeori-parameters --target-key-id <KeyId from the output>
+echo "export LAB_JEV_KMS_KEY_ARN=<Arn from the create-key output>" >> .byeori.env
+source .byeori.env
+```
+
+The key costs $1 a month. Then deploy the stack and register each member (the member's IAM user
+must exist first; `docs/LAB-SERVICE.md` explains how):
+
+```bash
+uv run byeori deploy-lab
+uv run python scripts/lab_members.py register --member-id <id> --iam-user <IAM user name> --role student --attach-policy
+uv run python scripts/lab_members.py outputs
+```
+
+`outputs` prints `GatewayUrl`, the address members connect to.
+
+## 8. Jev (optional)
+
+Jev is an external model that, after a student's answer, estimates whether the question deserves
+a new synthesis page. It needs a key from TypeSafe, stored in Parameter Store, and the student
+service from step 7. Everything is in `docs/JEV.md`.
+
+## 9. Connect a writing agent
+
+Byeori comes with two MCP servers, which let an agent such as Claude Code or Codex use the wiki
+as a set of tools.
+
+**Administrator (`byeori-mcp`)**: full access through your administrator profile, from this
+clone. Copy the values from `.byeori.env`:
+
+```bash
+claude mcp add -s user byeori \
+  -e AWS_PROFILE=<profile> -e AWS_REGION=<region> \
+  -e AWS_KIRO_WIKI_BUCKET=<bucket> -e AWS_KIRO_WIKI_TABLE=<table> \
+  -e AWS_KIRO_WIKI_INGEST_FUNCTION=<ingest function> \
+  -- uv run --project <absolute path to this clone> byeori-mcp
+```
+
+If a second person administers the stack, give their IAM user the policy it needs:
+`uv run byeori grant-client --attach-to-user <IAM user name>` (without `--attach-to-user` it only
+prints the policy).
+
+**Members (`byeori-lab-mcp`)**: answer-only, through the student service of step 7. No clone
+is needed; `uvx` fetches the package:
+
+```bash
+claude mcp add -s user byeori-lab -e LAB_FUNCTION_URL=<gateway url> -e AWS_REGION=<region> -e AWS_PROFILE=<profile> -- uvx --from git+https://github.com/joonan-lab/byeori byeori-lab-mcp
+```
+
+For Codex, add to `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.byeori-lab]
+command = "uvx"
+args = ["--from", "git+https://github.com/joonan-lab/byeori", "byeori-lab-mcp"]
+startup_timeout_sec = 60
+
+[mcp_servers.byeori-lab.env]
+LAB_FUNCTION_URL = "<gateway url>"
+AWS_REGION = "<region>"
+AWS_PROFILE = "<profile>"
+```
+
+The administrator server goes into Codex the same way, with `command = "uv"` and
+`args = ["run", "--project", "<absolute path to this clone>", "byeori-mcp"]` and the five
+variables above under `[mcp_servers.byeori.env]`.
+
+## 10. Cost and cleanup
+
+What things cost is in `docs/COST.md`. To see what you have actually spent, open Billing → Cost
+Explorer in the console and group by service.
+
+To remove Byeori, delete the student stack first (if you made one), then the main stack:
+
+```bash
+aws cloudformation delete-stack --stack-name byeori-lab
+aws cloudformation delete-stack --stack-name <your stack name>
+```
+
+On purpose, deleting the main stack does **not** delete the lab's data. These stay, and keep
+costing their storage, until you remove them by hand:
+
+- **The data bucket** (`AWS_KIRO_WIKI_BUCKET` in `.byeori.env`), with every PDF and page. To remove
+  it, open S3 → the bucket → Empty in the console, confirm, then Delete. This cannot be undone;
+  download anything you want to keep first.
+- **The audit bucket** (the stack output `AuditBucketName`), emptied and deleted the same way.
+- **The catalog table** (`AWS_KIRO_WIKI_TABLE`): `aws dynamodb delete-table --table-name <table>`.
+- **The ECR repository** with the worker image: in the console, ECR → Repositories → the
+  repository → Delete, or `aws ecr delete-repository --repository-name <name> --force`.
+- **The parameters and the KMS key**: `aws ssm delete-parameter --name <name>` for each key you
+  stored, and `aws kms schedule-key-deletion --key-id <key arn> --pending-window-in-days 7`.
