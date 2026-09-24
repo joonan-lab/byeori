@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="ko">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>자폐 유전체 문헌 카탈로그</title>
+<style>
+:root{font-family:system-ui,-apple-system,sans-serif;color:#182e2a;background:#f3f5f1}*{box-sizing:border-box}body{margin:0}main{max-width:1240px;margin:auto;padding:44px 28px}small,.muted{color:#60716a}h1{font-size:32px;letter-spacing:-1px;margin:12px 0}p{line-height:1.65}.intro{max-width:870px}.stats{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin:28px 0}.stat{padding:22px;background:white;border:1px solid #dbe3dc;border-radius:12px}.stat strong{display:block;font-size:28px;margin-bottom:5px}.filters{display:flex;flex-wrap:wrap;gap:12px;align-items:end;padding:20px;background:#e7eee7;border-radius:12px;margin-bottom:16px}label{font-size:13px;display:grid;gap:7px}input,select,button{font:inherit;padding:10px;border:1px solid #b6c7ba;border-radius:6px;background:white;color:#182e2a}.keyword{flex:1;min-width:230px}.check{display:flex;align-items:center;padding-bottom:10px}.count{margin:16px 0}.paper{padding:23px 0;border-bottom:1px solid #d7e0d8}.paper a{color:#173f32;text-decoration:none;font-size:19px;font-weight:650;line-height:1.45}.paper a:hover{text-decoration:underline}.meta{font-size:13px;margin:9px 0;color:#5a6b62;line-height:1.6}.badge{display:inline-block;font-size:12px;margin:3px 6px 0 0;padding:5px 9px;border-radius:5px;background:#e2eae2}.tag{background:#dbece2;color:#20593b}footer{font-size:12px;color:#637367;margin-top:30px;line-height:1.8}.pager{display:flex;gap:15px;align-items:center;margin-top:25px}button{cursor:pointer}button:disabled{opacity:.4;cursor:default}@media(max-width:680px){main{padding:25px 18px}.stats{grid-template-columns:1fr 1fr}.stat{padding:15px}h1{font-size:26px}.filters{padding:14px}.keyword{flex-basis:100%}}
+</style>
+<main>
+<small>OPENALEX / AUTISM GENOMICS</small>
+<h1>자폐 유전체 문헌 카탈로그</h1>
+<p class="intro">지난 15년의 문헌 후보를 연도와 연구 관련 키워드로 찾아봅니다. 제목, 저자, 저널, DOI, OpenAlex 주제를 검색합니다. 원문 내용을 검색하는 기능은 포함하지 않습니다.</p>
+<p class="muted" id="coverage"></p>
+<p class="muted" id="collection-notice"></p>
+<div class="stats" id="stats"></div>
+<div class="filters">
+<label class="keyword">검색어<input id="query" placeholder="예: de novo, SPARK, Satterstrom"></label>
+<label>시작 연도<select id="from"></select></label><label>끝 연도<select id="to"></select></label>
+<label>제목 기반 분류<select id="tag"><option value="">모든 분류</option></select></label>
+<label>저널 정책<select id="journal"><option value="include">허용 저널만</option><option value="review">허용 + 검토 대기(현재 없음)</option><option value="all">모든 저널</option></select></label>
+<label>관련성<select id="scope"><option value="">전체 후보</option><option value="autism_title">제목에 자폐 언급</option><option value="related_topic">관련 주제로 포함</option></select></label>
+<label>정렬<select id="sort"><option value="citations">인용 수</option><option value="newest">최신순</option><option value="oldest">오래된 순</option></select></label>
+<label class="check"><input type="checkbox" id="oa">공개 접근</label>
+<label class="check"><input type="checkbox" id="fulltext">OpenAlex 원문 수집 조건 충족</label>
+</div>
+<div class="count" id="count" aria-live="polite"></div><div id="papers"></div>
+<div class="pager"><button id="prev">이전</button><span id="page"></span><button id="next">다음</button></div>
+<footer>저널 정책은 2026-09-17에 정한 시험용 허용 목록(Nature와 영향력 지수 8 이상의 Nature 자매지, Cell, AJHG, Neuron, Science, Lancet, NEJM, JAMA와 영향력 지수 10 이상의 JAMA 자매지, Genome Medicine, Genome Biology)에 따른 표시이며 논문의 품질 판정이 아닙니다. 분류는 제목의 키워드에 따른 자동 표시이며 실제 연구 방법을 검증한 결과가 아닙니다. 원문 수집 조건 충족은 OpenAlex 메타데이터상 공개 라이선스와 PDF/XML 주소가 있다는 뜻이며, 다운로드 성공이나 원문 검토를 의미하지 않습니다. 인용 수는 수집 시점의 값입니다. 사람 대상 연구 여부와 개별 연구의 적합성은 원문에서 확인해야 합니다.<br><span id="snapshot"></span></footer>
+</main>
+<script type="application/json" id="data">__CORPUS_DATA__</script>
+<script>
+'use strict';
+const data=JSON.parse(document.getElementById('data').textContent), all=data.papers;
+const el=id=>document.getElementById(id); let page=0; const size=25;
+function text(tag,value,className){const n=document.createElement(tag);n.textContent=String(value??'').replaceAll('\u00b7',',');if(className)n.className=className;return n;}
+const manifest=data.manifest, config=manifest.configuration||{};
+el('coverage').textContent=`누적 저장 후보의 발행일: ${data.catalog_date_range.start||'미확인'} ~ ${data.catalog_date_range.end||'미확인'}. 최근 수집 범위: ${config.start||'미확인'} ~ ${config.end||'미확인'}, 검색어 ${config.queries?.length||0}개, 연도와 검색어별 최대 ${config.per_query_limit||100}건. 전수 문헌 목록은 아닙니다.`;
+el('collection-notice').textContent=manifest.queries?`최근 수집에서 ${manifest.queries.length}회 조회 중 ${manifest.at_limit_queries||0}회가 검색 결과 상한에 도달했습니다. 수집 또는 저장 오류: ${manifest.errors?.length||0}건.`:'수집 범위와 오류 내역은 해당 실행의 기록에서 확인할 수 있습니다.';
+for(const [value,label] of [[all.length,'문헌 후보'],[new Set(all.map(p=>p.publication_year)).size,'수록 연도'],[all.filter(p=>p.is_open_access).length,'공개 접근'],[all.filter(p=>p.fulltext_eligible).length,'원문 수집 조건 충족'],[all.filter(p=>p.journal_verdict==='include').length,'허용 저널']]){const card=text('div','','stat');card.append(text('strong',value.toLocaleString()),text('small',label));el('stats').append(card);}
+const years=[...new Set(all.map(p=>p.publication_year).filter(Boolean))].sort((a,b)=>a-b);
+for(const id of ['from','to'])for(const year of years){const option=text('option',year);option.value=year;el(id).append(option);}
+if(years.length)el('to').value=years[years.length-1];
+for(const tag of [...new Set(all.flatMap(p=>p.tags))].sort()){const option=text('option',tag);option.value=tag;el('tag').append(option);}
+function render(){
+ const terms=el('query').value.toLowerCase().trim().split(/\s+/).filter(Boolean);
+ const rows=all.filter(p=>terms.every(t=>p.search_text.includes(t))&&p.publication_year>=Number(el('from').value)&&p.publication_year<=Number(el('to').value)&&(!el('tag').value||p.tags.includes(el('tag').value))&&(!el('scope').value||p.scope===el('scope').value)&&(!el('oa').checked||p.is_open_access)&&(!el('fulltext').checked||p.fulltext_eligible)&&(el('journal').value==='all'||p.journal_verdict==='include'||(el('journal').value==='review'&&p.journal_verdict==='review')));
+ rows.sort((a,b)=>el('sort').value==='citations'?b.cited_by_count-a.cited_by_count:el('sort').value==='newest'?String(b.publication_date).localeCompare(String(a.publication_date)):String(a.publication_date).localeCompare(String(b.publication_date)));
+ const pages=Math.max(1,Math.ceil(rows.length/size));page=Math.min(page,pages-1);
+ el('count').textContent=`${rows.length.toLocaleString()}건 / 전체 ${all.length.toLocaleString()}건`;
+ el('papers').replaceChildren();
+ for(const p of rows.slice(page*size,(page+1)*size)){
+  const article=text('article','','paper'),link=text('a',p.title);
+  link.href=p.doi&&p.doi.startsWith('10.')?'https://doi.org/'+encodeURI(p.doi):'https://openalex.org/'+encodeURIComponent(p.work_id);link.target='_blank';link.rel='noopener noreferrer';article.append(link);
+  article.append(text('div',[p.publication_date,p.source||'저널 정보 미확인',p.type,`인용 ${p.cited_by_count}`,p.work_id].join(' / '),'meta'));
+  article.append(text('div',p.authors.slice(0,5).join(', ')+(p.authors.length>5?' 외':''),'meta'));
+  for(const tag of p.tags)article.append(text('span',tag,'badge tag'));
+  article.append(text('span',p.scope==='autism_title'?'제목에 자폐 언급':'관련 주제 후보','badge'));
+  if(p.is_open_access)article.append(text('span','공개 접근','badge'));
+  if(p.fulltext_eligible)article.append(text('span','원문 수집 조건 충족','badge'));
+  article.append(text('span',p.journal_verdict==='include'?`허용 저널: ${p.journal_family}`:p.journal_verdict==='review'?`검토 대기: ${p.journal_family}`:'허용 목록 밖 저널','badge'+(p.journal_verdict==='include'?' tag':'')));
+  article.append(text('span','원문 미검토','badge'));el('papers').append(article);
+ }
+ if(!rows.length)el('papers').append(text('p','조건에 맞는 후보를 찾지 못했습니다. 검색어나 연도 범위를 바꿔보세요.'));
+ el('page').textContent=`${page+1} / ${pages}`;el('prev').disabled=page===0;el('next').disabled=page>=pages-1;
+}
+for(const id of ['query','from','to','tag','journal','scope','sort','oa','fulltext'])el(id).addEventListener(id==='query'?'input':'change',()=>{page=0;render();});
+el('prev').onclick=()=>{page--;render();};el('next').onclick=()=>{page++;render();};
+el('snapshot').textContent=`${data.backend==='aws'?'DynamoDB에서 조회한':'로컬 DB에서 조회한'} 메타데이터 스냅샷 / 생성 ${data.generated_at}. 이 파일은 저장된 목록을 오프라인으로 검색하며 DB를 실시간 갱신하지 않습니다.`;
+render();
+</script>
+</html>

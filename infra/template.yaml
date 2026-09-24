@@ -1,0 +1,1537 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Serverless OpenAlex ingest and storage for the AWS Kiro Wiki workshop.
+
+Parameters:
+  RetentionDays:
+    Type: Number
+    Default: 0
+    MinValue: 0
+    Description: Days before objects expire from S3. 0 disables expiration so ingested PDFs are kept as a durable archive.
+  OpenAlexApiKeyParameterName:
+    Type: String
+    Description: Existing SSM SecureString parameter containing the OpenAlex API key.
+  ContactEmail:
+    Type: String
+    Default: ""
+    Description: Contact address sent to OpenAlex, Crossref and NCBI as the polite-pool address; may be empty.
+  DraftModelId:
+    Type: String
+    Default: global.anthropic.claude-opus-5
+    Description: Bedrock model or inference profile used by the draft action.
+  NoteModelId:
+    Type: String
+    Default: global.anthropic.claude-opus-5
+    Description: >-
+      Bedrock model that writes evidence notes (source_note). Separate from DraftModelId, which
+      answers and synthesis keep using (user, 2026-09-23).
+  SynthesisModelId:
+    Type: String
+    Default: global.anthropic.claude-opus-5
+    Description: >-
+      Bedrock model that writes synthesis pages (concept, subtopic, category), separate from
+      DraftModelId since 2026-09-23 (user). SynthesisFallbackModelId writes what it declines.
+  SynthesisFallbackModelId:
+    Type: String
+    Default: global.anthropic.claude-opus-5
+    Description: Makes a synthesis call again when SynthesisModelId's output ends content_filtered. Empty disables it.
+  SynthesisReasoning:
+    Type: String
+    Default: high
+    AllowedValues: [default, low, medium, high, xhigh, max]
+    Description: Adaptive-thinking effort for synthesis, apart from IngestReasoning since 2026-09-23.
+  NoteFallbackModelId:
+    Type: String
+    Default: global.anthropic.claude-opus-5
+    Description: >-
+      Writes the note instead when NoteModelId's output ends content_filtered. Empty disables the
+      fallback, and the declined note is then recorded as failed.
+  IndexRebuildSchedule:
+    Type: String
+    Default: "cron(0 19 * * ? *)"
+    Description: >-
+      When to rebuild the search index, in UTC. The default is 04:00 KST. Rebuilding changes the
+      index object's ETag, which drops the copy every warm Lambda keeps in /tmp, so the next
+      request in each execution environment pays the cold fetch again. Putting that at a fixed
+      quiet hour keeps it out of the lab's working day. Set to an empty string to disable.
+  NotesConcurrency:
+    Type: Number
+    Default: 8
+    MinValue: 1
+    MaxValue: 64
+    Description: Papers written at once by the notes state machine. Bedrock throttling, not the client, is the ceiling.
+  SynthesisConcurrency:
+    Type: Number
+    Default: 4
+    MinValue: 1
+    MaxValue: 32
+    Description: Synthesis pages written at once. A page's prompt is several notes long, so Bedrock throttles sooner than for notes.
+  SynthesisMaxPages:
+    Type: Number
+    Default: 1500
+    MinValue: 1
+    Description: Most pages one synthesis run may write per work list, so a prompt defect stops before it has spent the budget.
+
+  IngestReasoning:
+    Type: String
+    Default: default
+    AllowedValues: [default, low, medium, high, xhigh, max]
+    Description: Adaptive-thinking effort for Bedrock page writing (llm-wiki ingest_reasoning); default = no thinking.
+  QuestionBudgetUsd:
+    Type: Number
+    Default: 5
+    MinValue: 1
+    MaxValue: 20
+    Description: What one research question may spend before the loop stops and writes its answer.
+  CreateVpc:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: '"true": the stack creates its own VPC with two public subnets for the Fargate tasks. "false": pass VpcId and ExtractionSubnets.'
+  VpcId:
+    Type: String
+    Default: ""
+    Description: VPC whose public subnets run the extraction tasks. Required when CreateVpc is false.
+  ExtractionSubnets:
+    Type: CommaDelimitedList
+    Default: ""
+    Description: Public subnets (auto-assign public IP) for Fargate extraction tasks. Required when CreateVpc is false.
+  GrobidImage:
+    Type: String
+    Default: lfoppiano/grobid:0.8.2
+    Description: Public GROBID image (CRF models) pulled by Fargate.
+
+  AssetImageTag:
+    Type: String
+    Default: latest
+    Description: Tag of the figure-and-table image in this stack's ECR repository.
+
+Rules:
+  VpcGivenOrCreated:
+    RuleCondition: !Equals [!Ref CreateVpc, "false"]
+    Assertions:
+      - Assert: !Not [!Equals [!Ref VpcId, ""]]
+        AssertDescription: Pass VpcId and ExtractionSubnets, or set CreateVpc to true.
+
+Conditions:
+  ExpireObjects: !Not [!Equals [!Ref RetentionDays, 0]]
+  HasIndexRebuildSchedule: !Not [!Equals [!Ref IndexRebuildSchedule, ""]]
+  CreateOwnVpc: !Equals [!Ref CreateVpc, "true"]
+
+Resources:
+  DataBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration: !If
+        - ExpireObjects
+        - Rules:
+            - Id: ExpireWorkshopData
+              Status: Enabled
+              ExpirationInDays: !Ref RetentionDays
+        - !Ref AWS::NoValue
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      # Through EventBridge rather than a direct Lambda notification: a notification names the
+      # function, the function's permission names the bucket, and CloudFormation cannot create
+      # either first. EventBridge also lets a second reader be added later without touching this.
+      NotificationConfiguration:
+        EventBridgeConfiguration:
+          EventBridgeEnabled: true
+
+  CatalogTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: work_id
+          AttributeType: S
+        - AttributeName: doi
+          AttributeType: S
+      KeySchema:
+        - AttributeName: work_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: doi-index
+          KeySchema:
+            - AttributeName: doi
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+
+  IngestFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: WorkshopDataWrite
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                Resource: !Sub "${DataBucket.Arn}/*"
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource: !GetAtt DataBucket.Arn
+              - Effect: Allow
+                Action:
+                  - dynamodb:UpdateItem
+                  - dynamodb:GetItem
+                  # plan_notes reads the whole catalogue to decide what a run should cover, so
+                  # the decision is made where the data is rather than on whichever laptop is open.
+                  - dynamodb:Scan
+                  # resolve_identity asks doi-index whether another row already holds the DOI it is
+                  # about to write. Refused, that question answers "nobody does", which is how one
+                  # paper ends up with two rows.
+                  - dynamodb:Query
+                Resource:
+                  - !GetAtt CatalogTable.Arn
+                  - !Sub "${CatalogTable.Arn}/index/*"
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:bedrock:*::foundation-model/anthropic.*"
+                  - !Sub "arn:${AWS::Partition}:bedrock:*:${AWS::AccountId}:inference-profile/*"
+              - Effect: Allow
+                Action:
+                  - aws-marketplace:ViewSubscriptions
+                  - aws-marketplace:Subscribe
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                Resource: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${OpenAlexApiKeyParameterName}"
+
+  IngestFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: Downloads licensed OpenAlex PDF and GROBID content into the bucket; drafts evidence notes, paper pages, and topic pages with Bedrock.
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt IngestFunctionRole.Arn
+      MemorySize: 1024
+      Timeout: 900
+      EphemeralStorage:
+        Size: 2048
+      Environment:
+        Variables:
+          BUCKET_NAME: !Ref DataBucket
+          TABLE_NAME: !Ref CatalogTable
+          OPENALEX_API_KEY_PARAMETER: !Ref OpenAlexApiKeyParameterName
+          DRAFT_MODEL_ID: !Ref DraftModelId
+          NOTE_MODEL_ID: !Ref NoteModelId
+          NOTE_FALLBACK_MODEL_ID: !Ref NoteFallbackModelId
+          INGEST_REASONING: !Ref IngestReasoning
+          QUESTION_BUDGET_USD: !Ref QuestionBudgetUsd
+          BYEORI_CONTACT_EMAIL: !Ref ContactEmail
+      Code: ../src
+
+  IngestLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${IngestFunction}"
+      RetentionInDays: 7
+
+  SynthesisFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: {Service: [lambda.amazonaws.com]}
+            Action: [sts:AssumeRole]
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: SynthesisReadWrite
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [s3:GetObject, s3:PutObject]
+                Resource: !Sub "${DataBucket.Arn}/*"
+              - Effect: Allow
+                Action: [s3:ListBucket]
+                Resource: !GetAtt DataBucket.Arn
+              - Effect: Allow
+                Action: [dynamodb:GetItem, dynamodb:UpdateItem, dynamodb:Scan]
+                Resource: !GetAtt CatalogTable.Arn
+              - Effect: Allow
+                Action: [bedrock:InvokeModel]
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:bedrock:*::foundation-model/anthropic.*"
+                  - !Sub "arn:${AWS::Partition}:bedrock:*:${AWS::AccountId}:inference-profile/*"
+              - Effect: Allow
+                Action: [aws-marketplace:ViewSubscriptions, aws-marketplace:Subscribe]
+                Resource: "*"
+
+  SynthesisFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: Plans and writes the synthesis layer (concept, subtopic and category pages) from the notes in S3. Packaged from src/ by `aws cloudformation package`.
+      Runtime: python3.12
+      Handler: byeori.synthesis_lambda.handler
+      Role: !GetAtt SynthesisFunctionRole.Arn
+      MemorySize: 3008
+      Timeout: 900
+      EphemeralStorage:
+        Size: 1024
+      Environment:
+        Variables:
+          BUCKET_NAME: !Ref DataBucket
+          TABLE_NAME: !Ref CatalogTable
+          DRAFT_MODEL_ID: !Ref DraftModelId
+          INGEST_REASONING: !Ref IngestReasoning
+          SYNTHESIS_MODEL_ID: !Ref SynthesisModelId
+          SYNTHESIS_FALLBACK_MODEL_ID: !Ref SynthesisFallbackModelId
+          SYNTHESIS_REASONING: !Ref SynthesisReasoning
+          SYNTHESIS_MAX_PAGES: !Ref SynthesisMaxPages
+          BYEORI_CONTACT_EMAIL: !Ref ContactEmail
+      Code: ../src
+
+  SynthesisLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${SynthesisFunction}"
+      RetentionInDays: 14
+
+  ByeoriVpc:
+    Type: AWS::EC2::VPC
+    Condition: CreateOwnVpc
+    Properties:
+      CidrBlock: 10.42.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+  ByeoriInternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Condition: CreateOwnVpc
+  ByeoriGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Condition: CreateOwnVpc
+    Properties:
+      VpcId: !Ref ByeoriVpc
+      InternetGatewayId: !Ref ByeoriInternetGateway
+  ByeoriPublicSubnetA:
+    Type: AWS::EC2::Subnet
+    Condition: CreateOwnVpc
+    Properties:
+      VpcId: !Ref ByeoriVpc
+      CidrBlock: 10.42.0.0/20
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+  ByeoriPublicSubnetB:
+    Type: AWS::EC2::Subnet
+    Condition: CreateOwnVpc
+    Properties:
+      VpcId: !Ref ByeoriVpc
+      CidrBlock: 10.42.16.0/20
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+  ByeoriRouteTable:
+    Type: AWS::EC2::RouteTable
+    Condition: CreateOwnVpc
+    Properties:
+      VpcId: !Ref ByeoriVpc
+  ByeoriDefaultRoute:
+    Type: AWS::EC2::Route
+    Condition: CreateOwnVpc
+    DependsOn: ByeoriGatewayAttachment
+    Properties:
+      RouteTableId: !Ref ByeoriRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref ByeoriInternetGateway
+  ByeoriSubnetRouteA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: CreateOwnVpc
+    Properties:
+      SubnetId: !Ref ByeoriPublicSubnetA
+      RouteTableId: !Ref ByeoriRouteTable
+  ByeoriSubnetRouteB:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: CreateOwnVpc
+    Properties:
+      SubnetId: !Ref ByeoriPublicSubnetB
+      RouteTableId: !Ref ByeoriRouteTable
+
+  ExtractionCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterSettings:
+        - Name: containerInsights
+          Value: disabled
+
+  ExtractionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      RetentionInDays: 14
+
+  ExtractionSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Egress-only group for Byeori extraction tasks
+      VpcId: !If [CreateOwnVpc, !Ref ByeoriVpc, !Ref VpcId]
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: 0.0.0.0/0
+
+  ExtractionExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+
+  ExtractionTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ExtractionDataAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                Resource: !Sub "${DataBucket.Arn}/*"
+              # S3 returns 403 for a missing HeadObject without ListBucket permission.
+              # Repair reports must prove the new receipt key is unused before any write.
+              - Effect: Allow
+                Action: s3:ListBucket
+                Resource: !GetAtt DataBucket.Arn
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:UpdateItem
+                Resource: !GetAtt CatalogTable.Arn
+
+  ExtractionTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      RequiresCompatibilities: [FARGATE]
+      NetworkMode: awsvpc
+      Cpu: "4096"
+      Memory: "16384"
+      ExecutionRoleArn: !GetAtt ExtractionExecutionRole.Arn
+      TaskRoleArn: !GetAtt ExtractionTaskRole.Arn
+      RuntimePlatform:
+        OperatingSystemFamily: LINUX
+        CpuArchitecture: X86_64
+      ContainerDefinitions:
+        - Name: grobid
+          Image: !Ref GrobidImage
+          Essential: false
+          Memory: 13312
+          PortMappings:
+            - ContainerPort: 8070
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref ExtractionLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: grobid
+        - Name: worker
+          Image: public.ecr.aws/docker/library/python:3.12-slim
+          Essential: true
+          Memory: 2048
+          Command:
+            - sh
+            - -c
+            - >-
+              pip install -q boto3 requests &&
+              python -c "import boto3,os; boto3.client('s3').download_file(os.environ['BUCKET_NAME'], 'worker/extract.py', '/tmp/extract.py')" &&
+              python /tmp/extract.py
+          Environment:
+            - Name: BUCKET_NAME
+              Value: !Ref DataBucket
+            - Name: TABLE_NAME
+              Value: !Ref CatalogTable
+            - Name: AWS_DEFAULT_REGION
+              Value: !Ref AWS::Region
+            - Name: GROBID_URL
+              Value: http://localhost:8070
+            - Name: JOB_KEY
+              Value: jobs/none.json
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref ExtractionLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: worker
+
+  # ---- A paper's figures and tables, cut as the paper arrives -------------------------------
+  # The 11,554 papers already here got their crops in one four-hour run on a laptop. A paper
+  # arriving now gets them by itself, in seconds, because everything it needs is in the image.
+  AssetRepository:
+    Type: AWS::ECR::Repository
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      LifecyclePolicy:
+        # The image is rebuilt only when marker or its models change, which is rare; three is
+        # enough to roll back to the one that worked without paying to store every build.
+        LifecyclePolicyText: |
+          {"rules": [{"rulePriority": 1,
+                      "description": "Keep the three most recent images",
+                      "selection": {"tagStatus": "any", "countType": "imageCountMoreThan",
+                                    "countNumber": 3},
+                      "action": {"type": "expire"}}]}
+
+  AssetTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      RequiresCompatibilities: [FARGATE]
+      NetworkMode: awsvpc
+      # Measured on this worker: a 16 MB, 37-page paper converts in 14 seconds and a 4 MB one in
+      # 4, on two cores, holding the rf-detr layout model and a DistilBert classifier. No VLM is
+      # ever constructed, which is what keeps this inside 4 GB.
+      Cpu: "2048"
+      Memory: "4096"
+      ExecutionRoleArn: !GetAtt ExtractionExecutionRole.Arn
+      TaskRoleArn: !GetAtt ExtractionTaskRole.Arn
+      RuntimePlatform:
+        OperatingSystemFamily: LINUX
+        # Graviton: the work is pure CPU, the image is built natively on the user's Mac, and it
+        # costs about a fifth less than the x86 equivalent.
+        CpuArchitecture: ARM64
+      ContainerDefinitions:
+        - Name: worker
+          Image: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.${AWS::URLSuffix}/${AssetRepository}:${AssetImageTag}"
+          Essential: true
+          Environment:
+            - Name: BUCKET_NAME
+              Value: !Ref DataBucket
+            - Name: TABLE_NAME
+              Value: !Ref CatalogTable
+            - Name: AWS_DEFAULT_REGION
+              Value: !Ref AWS::Region
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref ExtractionLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: assets
+
+  AssetTriggerFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      Policies:
+        - PolicyName: StartAssetTask
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: ecs:RunTask
+                Resource: !Ref AssetTaskDefinition
+              # RunTask hands the task its two roles, so this function must be allowed to pass
+              # them - and only them.
+              - Effect: Allow
+                Action: iam:PassRole
+                Resource:
+                  - !GetAtt ExtractionExecutionRole.Arn
+                  - !GetAtt ExtractionTaskRole.Arn
+              # Only to ask whether the crops are already stored, so a re-extraction does not
+              # start a task that would find its own work already done.
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub "${DataBucket.Arn}/papers/*"
+              - Effect: Allow
+                Action: s3:ListBucket
+                Resource: !GetAtt DataBucket.Arn
+
+  AssetTriggerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: Starts the figure-and-table task for one paper when that paper's text is stored.
+      Runtime: python3.12
+      Handler: byeori.asset_trigger.handler
+      Role: !GetAtt AssetTriggerFunctionRole.Arn
+      MemorySize: 256
+      Timeout: 30
+      Environment:
+        Variables:
+          BUCKET_NAME: !Ref DataBucket
+          ASSET_CLUSTER: !Ref ExtractionCluster
+          ASSET_TASK_DEFINITION: !Ref AssetTaskDefinition
+          ASSET_SUBNETS: !Join [",", !If [CreateOwnVpc, [!Ref ByeoriPublicSubnetA, !Ref ByeoriPublicSubnetB], !Ref ExtractionSubnets]]
+          ASSET_SECURITY_GROUPS: !Ref ExtractionSecurityGroup
+      Code: ../src
+
+  AssetTriggerLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${AssetTriggerFunction}"
+      RetentionInDays: 30
+
+  AssetTriggerRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: A stored extraction means a new paper; cut its figures and tables.
+      State: ENABLED
+      EventPattern:
+        source: [aws.s3]
+        detail-type: ["Object Created"]
+        detail:
+          bucket:
+            name: [!Ref DataBucket]
+          object:
+            # The two shapes an extraction takes. "wiki/sources/" is excluded by the prefix
+            # itself: an evidence note is written about a paper, not by its arrival.
+            key:
+              - prefix: "papers/"
+              - prefix: "sources/"
+      Targets:
+        - Id: cut-assets
+          Arn: !GetAtt AssetTriggerFunction.Arn
+
+  AssetTriggerPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt AssetTriggerFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt AssetTriggerRule.Arn
+
+  # ---- An upload settles its own identity ---------------------------------------------------
+  # Which paper an uploaded PDF is used to be decided on a laptop, so a paper sat at
+  # fulltext_ready_unclassified until somebody ran the script; 386 of them were waiting on
+  # 2026-09-23, when the user asked for the intake to run by itself. The stored text is the
+  # signal, the same one the figures wait for, and the input transformer is what lets the ingest
+  # function be the target directly: it takes an action, and an S3 event carries none.
+  IdentityTriggerRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: A stored extraction means a paper whose identity nobody has settled yet.
+      State: ENABLED
+      EventPattern:
+        source: [aws.s3]
+        detail-type: ["Object Created"]
+        detail:
+          bucket:
+            name: [!Ref DataBucket]
+          object:
+            key:
+              - suffix: "/clean.md"
+      Targets:
+        - Id: resolve-identity
+          Arn: !GetAtt IngestFunction.Arn
+          InputTransformer:
+            InputPathsMap:
+              key: "$.detail.object.key"
+            InputTemplate: '{"action": "resolve_identity", "key": <key>}'
+          # A paper whose OpenAlex call fails is retried, and then left for a person rather than
+          # queued forever: the next run of the script finds it exactly as it is.
+          RetryPolicy:
+            MaximumRetryAttempts: 2
+            MaximumEventAgeInSeconds: 3600
+
+  IdentityTriggerPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt IngestFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt IdentityTriggerRule.Arn
+
+  # Who changed the synthesis layer. Scoped on purpose: the pipeline writes tens of thousands of
+  # notes and extractions a day, and none of that is a person's edit.
+  # ---- Notes run, orchestrated in AWS ------------------------------------------------------
+  # The loop used to run on a laptop, which made a 30-hour job depend on one machine staying
+  # awake on one network. Moving from a hotel to a house orphaned all eight worker sockets and
+  # cost 81 minutes on 2026-09-19. Here the loop belongs to no machine: a laptop starts it and
+  # can then close, change networks or be a different laptop entirely.
+  NotesStateMachineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: {Service: states.amazonaws.com}
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: run-notes
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !Sub "${IngestFunction.Arn}*"
+              # A distributed map runs its iterations as child executions of itself.
+              - Effect: Allow
+                Action: [states:StartExecution]
+                Resource: !Sub "arn:${AWS::Partition}:states:${AWS::Region}:${AWS::AccountId}:stateMachine:${AWS::StackName}-notes"
+              - Effect: Allow
+                Action: [states:DescribeExecution, states:StopExecution]
+                Resource: !Sub "arn:${AWS::Partition}:states:${AWS::Region}:${AWS::AccountId}:execution:${AWS::StackName}-notes/*"
+              - Effect: Allow
+                Action: [s3:GetObject, s3:ListBucket]
+                Resource:
+                  - !GetAtt DataBucket.Arn
+                  - !Sub "${DataBucket.Arn}/runs/*"
+              - Effect: Allow
+                Action: s3:PutObject
+                Resource: !Sub "${DataBucket.Arn}/runs/*"
+
+  NotesStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: !Sub "${AWS::StackName}-notes"
+      RoleArn: !GetAtt NotesStateMachineRole.Arn
+      DefinitionString: !Sub |
+        {
+          "Comment": "Plan, write notes, index, retry failures, then index recovered notes. Started with no input.",
+          "StartAt": "PlanNotes",
+          "States": {
+            "PlanNotes": {
+              "Type": "Task",
+              "Resource": "arn:${AWS::Partition}:states:::lambda:invoke",
+              "Parameters": {"FunctionName": "${IngestFunction.Arn}", "Payload": {"action": "plan_notes"}},
+              "ResultSelector": {"manifest.$": "$.Payload.manifest", "count.$": "$.Payload.count"},
+              "ResultPath": "$.plan",
+              "Retry": [{"ErrorEquals": ["States.ALL"], "IntervalSeconds": 20, "MaxAttempts": 3, "BackoffRate": 2.0}],
+              "Next": "WriteNotes"
+            },
+            "WriteNotes": {
+              "Type": "Map",
+              "ItemReader": {
+                "Resource": "arn:${AWS::Partition}:states:::s3:getObject",
+                "ReaderConfig": {"InputType": "JSON"},
+                "Parameters": {"Bucket.$": "$.plan.manifest.bucket", "Key.$": "$.plan.manifest.key"}
+              },
+              "ItemProcessor": {
+                "ProcessorConfig": {"Mode": "DISTRIBUTED", "ExecutionType": "STANDARD"},
+                "StartAt": "SourceNote",
+                "States": {
+                  "SourceNote": {
+                    "Type": "Task",
+                    "Resource": "arn:${AWS::Partition}:states:::lambda:invoke",
+                    "Parameters": {"FunctionName": "${IngestFunction.Arn}",
+                                   "Payload": {"action": "source_note", "stem.$": "$.stem"}},
+                    "Retry": [{"ErrorEquals": ["Lambda.TooManyRequestsException", "Lambda.ServiceException",
+                                               "Lambda.AWSLambdaException", "Lambda.SdkClientException",
+                                               "States.TaskFailed", "States.Timeout"],
+                               "IntervalSeconds": 30, "MaxAttempts": 3, "BackoffRate": 2.0}],
+                    "ResultSelector": {"status.$": "$.Payload.status"},
+                    "End": true
+                  }
+                }
+              },
+              "ItemSelector": {"stem.$": "$$.Map.Item.Value"},
+              "MaxConcurrency": ${NotesConcurrency},
+              "ToleratedFailurePercentage": 100,
+              "ResultWriter": {
+                "Resource": "arn:${AWS::Partition}:states:::s3:putObject",
+                "Parameters": {"Bucket": "${DataBucket}", "Prefix": "runs/notes"}
+              },
+              "ResultPath": "$.notes",
+              "Next": "BuildIndex"
+            },
+            "BuildIndex": {
+              "Type": "Task",
+              "Resource": "arn:${AWS::Partition}:states:::lambda:invoke",
+              "Parameters": {"FunctionName": "${IngestFunction.Arn}", "Payload": {"action": "build_index"}},
+              "ResultPath": null,
+              "Retry": [{"ErrorEquals": ["States.ALL"], "IntervalSeconds": 30, "MaxAttempts": 3, "BackoffRate": 2.0}],
+              "Next": "PlanFailures"
+            },
+            "PlanFailures": {
+              "Type": "Task",
+              "Resource": "arn:${AWS::Partition}:states:::lambda:invoke",
+              "Parameters": {"FunctionName": "${IngestFunction.Arn}",
+                             "Payload": {"action": "plan_notes", "only_failed": true}},
+              "ResultSelector": {"manifest.$": "$.Payload.manifest", "count.$": "$.Payload.count"},
+              "ResultPath": "$.plan",
+              "Retry": [{"ErrorEquals": ["States.ALL"], "IntervalSeconds": 20, "MaxAttempts": 3, "BackoffRate": 2.0}],
+              "Next": "RetryFailures"
+            },
+            "RetryFailures": {
+              "Type": "Map",
+              "ItemReader": {
+                "Resource": "arn:${AWS::Partition}:states:::s3:getObject",
+                "ReaderConfig": {"InputType": "JSON"},
+                "Parameters": {"Bucket.$": "$.plan.manifest.bucket", "Key.$": "$.plan.manifest.key"}
+              },
+              "ItemProcessor": {
+                "ProcessorConfig": {"Mode": "DISTRIBUTED", "ExecutionType": "STANDARD"},
+                "StartAt": "RetrySourceNote",
+                "States": {
+                  "RetrySourceNote": {
+                    "Type": "Task",
+                    "Resource": "arn:${AWS::Partition}:states:::lambda:invoke",
+                    "Parameters": {"FunctionName": "${IngestFunction.Arn}",
+                                   "Payload": {"action": "source_note", "stem.$": "$.stem"}},
+                    "Retry": [{"ErrorEquals": ["States.ALL"], "IntervalSeconds": 30, "MaxAttempts": 2, "BackoffRate": 2.0}],
+                    "ResultSelector": {"status.$": "$.Payload.status"},
+                    "End": true
+                  }
+                }
+              },
+              "ItemSelector": {"stem.$": "$$.Map.Item.Value"},
+              "MaxConcurrency": ${NotesConcurrency},
+              "ToleratedFailurePercentage": 100,
+              "ResultWriter": {
+                "Resource": "arn:${AWS::Partition}:states:::s3:putObject",
+                "Parameters": {"Bucket": "${DataBucket}", "Prefix": "runs/retry"}
+              },
+              "Next": "RebuildAfterRetry"
+            },
+            "RebuildAfterRetry": {
+              "Type": "Task",
+              "Resource": "arn:${AWS::Partition}:states:::lambda:invoke",
+              "Parameters": {"FunctionName": "${IngestFunction.Arn}", "Payload": {"action": "build_index"}},
+              "ResultPath": null,
+              "Retry": [{"ErrorEquals": ["States.ALL"], "IntervalSeconds": 30, "MaxAttempts": 3, "BackoffRate": 2.0}],
+              "End": true
+            }
+          }
+        }
+
+  OpenAlexMatchStateMachineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: {Service: states.amazonaws.com}
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: match-openalex
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !GetAtt IngestFunction.Arn
+
+  OpenAlexMatchStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: !Sub "${AWS::StackName}-openalex-match"
+      RoleArn: !GetAtt OpenAlexMatchStateMachineRole.Arn
+      DefinitionString: !Sub |
+        {
+          "Comment": "Bounded DOI matching with S3 checkpoints and AWS-managed rate-limit waits.",
+          "StartAt": "Initialize",
+          "States": {
+            "Initialize": {
+              "Type": "Pass",
+              "Parameters": {"run_id.$": "$$.Execution.Name", "limit.$": "$.limit",
+                             "batch.$": "$.batch", "refresh.$": "$.refresh"},
+              "Next": "MatchBatch"
+            },
+            "MatchBatch": {
+              "Type": "Task",
+              "Resource": "arn:${AWS::Partition}:states:::lambda:invoke",
+              "Parameters": {"FunctionName": "${IngestFunction.Arn}",
+                             "Payload": {"action": "openalex_match_batch", "run_id.$": "$.run_id",
+                                         "limit.$": "$.limit", "batch.$": "$.batch", "refresh.$": "$.refresh"}},
+              "ResultSelector": {"result.$": "$.Payload"},
+              "ResultPath": "$.progress",
+              "Retry": [{"ErrorEquals": ["Lambda.TooManyRequestsException", "Lambda.ServiceException",
+                                         "Lambda.AWSLambdaException", "Lambda.SdkClientException",
+                                         "States.TaskFailed", "States.Timeout"],
+                         "IntervalSeconds": 10, "MaxAttempts": 3, "BackoffRate": 2.0}],
+              "Next": "Done"
+            },
+            "Done": {
+              "Type": "Choice",
+              "Choices": [{"Variable": "$.progress.result.done", "BooleanEquals": true, "Next": "Finished"}],
+              "Default": "WaitForBudgetWindow"
+            },
+            "WaitForBudgetWindow": {"Type": "Wait", "SecondsPath": "$.progress.result.wait_seconds", "Next": "MatchBatch"},
+            "Finished": {"Type": "Succeed"}
+          }
+        }
+
+  SynthesisStateMachineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: {Service: states.amazonaws.com}
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: run-synthesis
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource:
+                  - !Sub "${SynthesisFunction.Arn}*"
+                  - !Sub "${IngestFunction.Arn}*"
+              - Effect: Allow
+                Action: [states:StartExecution]
+                Resource: !Sub "arn:${AWS::Partition}:states:${AWS::Region}:${AWS::AccountId}:stateMachine:${AWS::StackName}-synthesis"
+              - Effect: Allow
+                Action: [states:DescribeExecution, states:StopExecution]
+                Resource: !Sub "arn:${AWS::Partition}:states:${AWS::Region}:${AWS::AccountId}:execution:${AWS::StackName}-synthesis/*"
+              - Effect: Allow
+                Action: [s3:GetObject, s3:ListBucket]
+                Resource:
+                  - !GetAtt DataBucket.Arn
+                  - !Sub "${DataBucket.Arn}/runs/*"
+              - Effect: Allow
+                Action: s3:PutObject
+                Resource: !Sub "${DataBucket.Arn}/runs/*"
+
+  SynthesisStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: !Sub "${AWS::StackName}-synthesis"
+      RoleArn: !GetAtt SynthesisStateMachineRole.Arn
+      DefinitionString: !Sub |
+        {
+          "Comment": "Plan and write the synthesis layer for one scope. Input: {scope, plan_only, categories, skip_concepts, replan}; the CLI always sends all five.",
+          "StartAt": "ResolveScope",
+          "States": {
+            "ResolveScope": {
+              "Type": "Task",
+              "Resource": "arn:${AWS::Partition}:states:::lambda:invoke",
+              "Parameters": {"FunctionName": "${SynthesisFunction.Arn}",
+                             "Payload": {"action": "resolve_scope", "scope.$": "$.scope", "categories.$": "$.categories"}},
+              "ResultSelector": {"categories.$": "$.Payload.categories"},
+              "ResultPath": "$.scope_info",
+              "Retry": [{"ErrorEquals": ["States.ALL"], "IntervalSeconds": 20, "MaxAttempts": 3, "BackoffRate": 2.0}],
+              "Next": "PlanSubtopics"
+            },
+            "PlanSubtopics": {
+              "Type": "Map",
+              "ItemsPath": "$.scope_info.categories",
+              "ItemSelector": {"category.$": "$$.Map.Item.Value", "replan.$": "$.replan", "resume": null},
+              "MaxConcurrency": 4,
+              "ResultPath": null,
+              "ItemProcessor": {
+                "ProcessorConfig": {"Mode": "INLINE"},
+                "StartAt": "PlanCategory",
+                "States": {
+                  "PlanCategory": {
+                    "Type": "Task",
+                    "Resource": "arn:${AWS::Partition}:states:::lambda:invoke",
+                    "Parameters": {"FunctionName": "${SynthesisFunction.Arn}",
+                                   "Payload": {"action": "plan_subtopics", "category.$": "$.category", "replan.$": "$.replan", "resume.$": "$.resume", "run_id.$": "$$.Execution.Id"}},
+                    "Retry": [{"ErrorEquals": ["Lambda.TooManyRequestsException", "Lambda.ServiceException", "States.Timeout"],
+                               "IntervalSeconds": 30, "MaxAttempts": 2, "BackoffRate": 2.0}],
+                    "Catch": [{"ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "PlanCategoryFailed"}],
+                    "ResultSelector": {"status.$": "$.Payload.status", "checkpoint.$": "$.Payload.checkpoint"},
+                    "ResultPath": "$.category_plan",
+                    "Next": "CategoryPlanDone"
+                  },
+                  "CategoryPlanDone": {
+                    "Type": "Choice",
+                    "Choices": [{"Variable": "$.category_plan.status", "StringEquals": "partial", "Next": "ResumeCategoryPlan"}],
+                    "Default": "CategoryPlanFinished"
+                  },
+                  "ResumeCategoryPlan": {
+                    "Type": "Pass",
+                    "Parameters": {"category.$": "$.category", "replan": false, "resume.$": "$.category_plan.checkpoint"},
+                    "Next": "PlanCategory"
+                  },
+                  "CategoryPlanFinished": {"Type": "Pass", "End": true},
+                  "PlanCategoryFailed": {"Type": "Pass", "End": true}
+                }
+              },
+              "Next": "CheckCategoryPlans"
+            },
+            "CheckCategoryPlans": {
+              "Type": "Task",
+              "Resource": "arn:${AWS::Partition}:states:::lambda:invoke",
+              "Parameters": {"FunctionName": "${SynthesisFunction.Arn}",
+                             "Payload": {"action": "category_plan_status", "categories.$": "$.scope_info.categories", "run_id.$": "$$.Execution.Id"}},
+              "ResultSelector": {"ready.$": "$.Payload.ready", "status.$": "$.Payload.status", "categories.$": "$.Payload.categories"},
+              "ResultPath": "$.category_plans",
+              "Retry": [{"ErrorEquals": ["Lambda.TooManyRequestsException", "Lambda.ServiceException"], "IntervalSeconds": 20, "MaxAttempts": 2}],
+              "Next": "CategoryPlansReady"
+            },
+            "CategoryPlansReady": {
+              "Type": "Choice",
+              "Choices": [{"Variable": "$.category_plans.ready", "BooleanEquals": true, "Next": "ConceptsWanted"}],
+              "Default": "CategoryPlanningFailed"
+            },
+            "CategoryPlanningFailed": {
+              "Type": "Fail",
+              "Error": "CategoryPlanningIncomplete",
+              "Cause": "At least one category has no valid current synthesis plan; inspect category_plans and the AWS planning diagnostics before retrying."
+            },
+            "ConceptsWanted": {
+              "Type": "Choice",
+              "Choices": [{"Variable": "$.skip_concepts", "BooleanEquals": true, "Next": "PlanOnly"}],
+              "Default": "PlanConcepts"
+            },
+            "PlanConcepts": {
+              "Type": "Task",
+              "Resource": "arn:${AWS::Partition}:states:::lambda:invoke",
+              "Parameters": {"FunctionName": "${SynthesisFunction.Arn}",
+                             "Payload": {"action": "plan_concepts", "scope.$": "$.scope", "categories.$": "$.categories"}},
+              "ResultSelector": {"status.$": "$.Payload.status", "manifest.$": "$.Payload.work_manifest", "count.$": "$.Payload.count"},
+              "ResultPath": "$.concept_plan",
+              "Retry": [{"ErrorEquals": ["States.ALL"], "IntervalSeconds": 30, "MaxAttempts": 2, "BackoffRate": 2.0}],
+              "Next": "ConceptPlanDone"
+            },
+            "ConceptPlanDone": {
+              "Type": "Choice",
+              "Choices": [{"Variable": "$.concept_plan.status", "StringEquals": "partial", "Next": "PlanConcepts"}],
+              "Default": "PlanOnly"
+            },
+            "PlanOnly": {
+              "Type": "Choice",
+              "Choices": [{"Variable": "$.plan_only", "BooleanEquals": true, "Next": "Planned"},
+                          {"Variable": "$.skip_concepts", "BooleanEquals": true, "Next": "PlanSubtopicPages"}],
+              "Default": "WriteConcepts"
+            },
+            "Planned": {"Type": "Succeed"},
+            "WriteConcepts": {
+              "Type": "Map",
+              "ItemReader": {
+                "Resource": "arn:${AWS::Partition}:states:::s3:getObject",
+                "ReaderConfig": {"InputType": "JSON"},
+                "Parameters": {"Bucket.$": "$.concept_plan.manifest.bucket", "Key.$": "$.concept_plan.manifest.key"}
+              },
+              "ItemSelector": {"item.$": "$$.Map.Item.Value"},
+              "ItemProcessor": {
+                "ProcessorConfig": {"Mode": "DISTRIBUTED", "ExecutionType": "STANDARD"},
+                "StartAt": "Page",
+                "States": {
+                  "Page": {
+                    "Type": "Task",
+                    "Resource": "arn:${AWS::Partition}:states:::lambda:invoke",
+                    "Parameters": {"FunctionName": "${SynthesisFunction.Arn}", "Payload.$": "$.item"},
+                    "Retry": [{"ErrorEquals": ["Lambda.TooManyRequestsException", "Lambda.ServiceException",
+                                               "Lambda.AWSLambdaException", "Lambda.SdkClientException",
+                                               "States.TaskFailed", "States.Timeout"],
+                               "IntervalSeconds": 30, "MaxAttempts": 3, "BackoffRate": 2.0}],
+                    "ResultSelector": {"status.$": "$.Payload.status"},
+                    "ResultPath": "$.result",
+                    "Next": "Done"
+                  },
+                  "Done": {
+                    "Type": "Choice",
+                    "Choices": [{"Variable": "$.result.status", "StringEquals": "partial", "Next": "Page"}],
+                    "Default": "Finished"
+                  },
+                  "Finished": {"Type": "Pass", "End": true}
+                }
+              },
+              "MaxConcurrency": ${SynthesisConcurrency},
+              "ToleratedFailurePercentage": 100,
+              "ResultWriter": {
+                "Resource": "arn:${AWS::Partition}:states:::s3:putObject",
+                "Parameters": {"Bucket": "${DataBucket}", "Prefix": "runs/synthesis/results"}
+              },
+              "ResultPath": null,
+              "Next": "PlanSubtopicPages"
+            },
+            "PlanSubtopicPages": {
+              "Type": "Task",
+              "Resource": "arn:${AWS::Partition}:states:::lambda:invoke",
+              "Parameters": {"FunctionName": "${SynthesisFunction.Arn}",
+                             "Payload": {"action": "plan_subtopic_pages", "scope.$": "$.scope", "categories.$": "$.scope_info.categories"}},
+              "ResultSelector": {"manifest.$": "$.Payload.manifest", "count.$": "$.Payload.count"},
+              "ResultPath": "$.subtopic_plan",
+              "Retry": [{"ErrorEquals": ["States.ALL"], "IntervalSeconds": 20, "MaxAttempts": 3, "BackoffRate": 2.0}],
+              "Next": "WriteSubtopics"
+            },
+            "WriteSubtopics": {
+              "Type": "Map",
+              "ItemReader": {
+                "Resource": "arn:${AWS::Partition}:states:::s3:getObject",
+                "ReaderConfig": {"InputType": "JSON"},
+                "Parameters": {"Bucket.$": "$.subtopic_plan.manifest.bucket", "Key.$": "$.subtopic_plan.manifest.key"}
+              },
+              "ItemSelector": {"item.$": "$$.Map.Item.Value"},
+              "ItemProcessor": {
+                "ProcessorConfig": {"Mode": "DISTRIBUTED", "ExecutionType": "STANDARD"},
+                "StartAt": "SubtopicPage",
+                "States": {
+                  "SubtopicPage": {
+                    "Type": "Task",
+                    "Resource": "arn:${AWS::Partition}:states:::lambda:invoke",
+                    "Parameters": {"FunctionName": "${SynthesisFunction.Arn}", "Payload.$": "$.item"},
+                    "Retry": [{"ErrorEquals": ["Lambda.TooManyRequestsException", "Lambda.ServiceException",
+                                               "Lambda.AWSLambdaException", "Lambda.SdkClientException",
+                                               "States.TaskFailed", "States.Timeout"],
+                               "IntervalSeconds": 30, "MaxAttempts": 3, "BackoffRate": 2.0}],
+                    "ResultSelector": {"status.$": "$.Payload.status"},
+                    "ResultPath": "$.result",
+                    "Next": "SubtopicDone"
+                  },
+                  "SubtopicDone": {
+                    "Type": "Choice",
+                    "Choices": [{"Variable": "$.result.status", "StringEquals": "partial", "Next": "SubtopicPage"}],
+                    "Default": "SubtopicFinished"
+                  },
+                  "SubtopicFinished": {"Type": "Pass", "End": true}
+                }
+              },
+              "MaxConcurrency": ${SynthesisConcurrency},
+              "ToleratedFailurePercentage": 100,
+              "ResultWriter": {
+                "Resource": "arn:${AWS::Partition}:states:::s3:putObject",
+                "Parameters": {"Bucket": "${DataBucket}", "Prefix": "runs/synthesis/results"}
+              },
+              "ResultPath": null,
+              "Next": "CategoryPages"
+            },
+            "CategoryPages": {
+              "Type": "Map",
+              "ItemsPath": "$.scope_info.categories",
+              "ItemSelector": {"category.$": "$$.Map.Item.Value"},
+              "MaxConcurrency": 2,
+              "ResultPath": null,
+              "ItemProcessor": {
+                "ProcessorConfig": {"Mode": "INLINE"},
+                "StartAt": "CategoryPage",
+                "States": {
+                  "CategoryPage": {
+                    "Type": "Task",
+                    "Resource": "arn:${AWS::Partition}:states:::lambda:invoke",
+                    "Parameters": {"FunctionName": "${SynthesisFunction.Arn}",
+                                   "Payload": {"action": "page", "kind": "category", "category.$": "$.category"}},
+                    "Retry": [{"ErrorEquals": ["Lambda.TooManyRequestsException", "Lambda.ServiceException", "States.Timeout"],
+                               "IntervalSeconds": 30, "MaxAttempts": 2, "BackoffRate": 2.0}],
+                    "Catch": [{"ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "CategoryPageFailed"}],
+                    "ResultSelector": {"status.$": "$.Payload.status"},
+                    "End": true
+                  },
+                  "CategoryPageFailed": {"Type": "Pass", "End": true}
+                }
+              },
+              "Next": "BuildIndex"
+            },
+            "BuildIndex": {
+              "Type": "Task",
+              "Resource": "arn:${AWS::Partition}:states:::lambda:invoke",
+              "Parameters": {"FunctionName": "${IngestFunction.Arn}", "Payload": {"action": "build_index"}},
+              "ResultPath": null,
+              "Retry": [{"ErrorEquals": ["States.ALL"], "IntervalSeconds": 30, "MaxAttempts": 3, "BackoffRate": 2.0}],
+              "Next": "PlanFailures"
+            },
+            "PlanFailures": {
+              "Type": "Task",
+              "Resource": "arn:${AWS::Partition}:states:::lambda:invoke",
+              "Parameters": {"FunctionName": "${SynthesisFunction.Arn}",
+                             "Payload": {"action": "plan_failures", "scope.$": "$.scope", "categories.$": "$.scope_info.categories"}},
+              "ResultSelector": {"manifest.$": "$.Payload.manifest", "count.$": "$.Payload.count"},
+              "ResultPath": "$.retry_plan",
+              "Retry": [{"ErrorEquals": ["States.ALL"], "IntervalSeconds": 20, "MaxAttempts": 3, "BackoffRate": 2.0}],
+              "Next": "RetryFailures"
+            },
+            "RetryFailures": {
+              "Type": "Map",
+              "ItemReader": {
+                "Resource": "arn:${AWS::Partition}:states:::s3:getObject",
+                "ReaderConfig": {"InputType": "JSON"},
+                "Parameters": {"Bucket.$": "$.retry_plan.manifest.bucket", "Key.$": "$.retry_plan.manifest.key"}
+              },
+              "ItemSelector": {"item.$": "$$.Map.Item.Value"},
+              "ItemProcessor": {
+                "ProcessorConfig": {"Mode": "DISTRIBUTED", "ExecutionType": "STANDARD"},
+                "StartAt": "RetryPage",
+                "States": {
+                  "RetryPage": {
+                    "Type": "Task",
+                    "Resource": "arn:${AWS::Partition}:states:::lambda:invoke",
+                    "Parameters": {"FunctionName": "${SynthesisFunction.Arn}", "Payload.$": "$.item"},
+                    "Retry": [{"ErrorEquals": ["States.ALL"], "IntervalSeconds": 30, "MaxAttempts": 2, "BackoffRate": 2.0}],
+                    "ResultSelector": {"status.$": "$.Payload.status"},
+                    "ResultPath": "$.result",
+                    "Next": "RetryDone"
+                  },
+                  "RetryDone": {
+                    "Type": "Choice",
+                    "Choices": [{"Variable": "$.result.status", "StringEquals": "partial", "Next": "RetryPage"}],
+                    "Default": "RetryFinished"
+                  },
+                  "RetryFinished": {"Type": "Pass", "End": true}
+                }
+              },
+              "MaxConcurrency": ${SynthesisConcurrency},
+              "ToleratedFailurePercentage": 100,
+              "ResultWriter": {
+                "Resource": "arn:${AWS::Partition}:states:::s3:putObject",
+                "Parameters": {"Bucket": "${DataBucket}", "Prefix": "runs/synthesis/retry"}
+              },
+              "ResultPath": null,
+              "Next": "RetryCategoryPages"
+            },
+            "RetryCategoryPages": {
+              "Type": "Map",
+              "ItemsPath": "$.scope_info.categories",
+              "ItemSelector": {"category.$": "$$.Map.Item.Value"},
+              "MaxConcurrency": 2,
+              "ResultPath": null,
+              "ItemProcessor": {
+                "ProcessorConfig": {"Mode": "INLINE"},
+                "StartAt": "RetryCategoryPage",
+                "States": {
+                  "RetryCategoryPage": {
+                    "Type": "Task",
+                    "Resource": "arn:${AWS::Partition}:states:::lambda:invoke",
+                    "Parameters": {"FunctionName": "${SynthesisFunction.Arn}",
+                                   "Payload": {"action": "page", "kind": "category", "category.$": "$.category"}},
+                    "Retry": [{"ErrorEquals": ["Lambda.TooManyRequestsException", "Lambda.ServiceException", "States.Timeout"],
+                               "IntervalSeconds": 30, "MaxAttempts": 2, "BackoffRate": 2.0}],
+                    "Catch": [{"ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "RetryCategoryPageFailed"}],
+                    "ResultSelector": {"status.$": "$.Payload.status"},
+                    "End": true
+                  },
+                  "RetryCategoryPageFailed": {"Type": "Pass", "End": true}
+                }
+              },
+              "Next": "RebuildIndex"
+            },
+            "RebuildIndex": {
+              "Type": "Task",
+              "Resource": "arn:${AWS::Partition}:states:::lambda:invoke",
+              "Parameters": {"FunctionName": "${IngestFunction.Arn}", "Payload": {"action": "build_index"}},
+              "ResultPath": null,
+              "Retry": [{"ErrorEquals": ["States.ALL"], "IntervalSeconds": 30, "MaxAttempts": 3, "BackoffRate": 2.0}],
+              "End": true
+            }
+          }
+        }
+
+  QuestionStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: !Sub "${AWS::StackName}-questions"
+      RoleArn: !GetAtt NotesStateMachineRole.Arn
+      DefinitionString: !Sub |
+        {
+          "Comment": "Ask each supplied research question once in AWS, keeping completed wiki work and indexing between batches.",
+          "StartAt": "InitialIndex",
+          "States": {
+            "InitialIndex": {
+              "Type": "Task",
+              "Resource": "arn:${AWS::Partition}:states:::lambda:invoke",
+              "Parameters": {"FunctionName": "${IngestFunction.Arn}", "Payload": {"action": "build_index"}},
+              "ResultPath": null,
+              "Retry": [{"ErrorEquals": ["States.ALL"], "IntervalSeconds": 30, "MaxAttempts": 2}],
+              "Next": "LoadBatch"
+            },
+            "LoadBatch": {
+              "Type": "Task",
+              "Resource": "arn:${AWS::Partition}:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "${IngestFunction.Arn}",
+                "Payload": {
+                  "action": "question_campaign_plan",
+                  "run_id.$": "$.run_id",
+                  "manifest_key.$": "$.manifest_key",
+                  "offset.$": "$.offset"
+                }
+              },
+              "OutputPath": "$.Payload",
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "Lambda.TooManyRequestsException"
+                  ],
+                  "IntervalSeconds": 20,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2
+                }
+              ],
+              "Next": "HaveQuestions"
+            },
+            "HaveQuestions": {
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Variable": "$.done",
+                  "BooleanEquals": true,
+                  "Next": "Finished"
+                }
+              ],
+              "Default": "AskQuestions"
+            },
+            "AskQuestions": {
+              "Type": "Map",
+              "ItemsPath": "$.items",
+              "MaxConcurrency": 6,
+              "ItemProcessor": {
+                "ProcessorConfig": {
+                  "Mode": "INLINE"
+                },
+                "StartAt": "AskOne",
+                "States": {
+                  "AskOne": {
+                    "Type": "Task",
+                    "Resource": "arn:${AWS::Partition}:states:::lambda:invoke",
+                    "Parameters": {
+                      "FunctionName": "${IngestFunction.Arn}",
+                      "Payload": {
+                        "action": "question_campaign_answer",
+                        "run_id.$": "$.run_id",
+                        "manifest_key.$": "$.manifest_key",
+                        "id.$": "$.id",
+                        "question.$": "$.question",
+                        "origin.$": "$.origin"
+                      }
+                    },
+                    "ResultPath": null,
+                    "Retry": [
+                      {
+                        "ErrorEquals": [
+                          "Lambda.TooManyRequestsException"
+                        ],
+                        "IntervalSeconds": 20,
+                        "MaxAttempts": 3,
+                        "BackoffRate": 2
+                      }
+                    ],
+                    "Catch": [
+                      {
+                        "ErrorEquals": [
+                          "States.ALL"
+                        ],
+                        "ResultPath": "$.invocation_error",
+                        "Next": "KeepFailure"
+                      }
+                    ],
+                    "End": true
+                  },
+                  "KeepFailure": {
+                    "Type": "Pass",
+                    "End": true
+                  }
+                }
+              },
+              "ResultPath": null,
+              "Next": "RefreshIndex"
+            },
+            "RefreshIndex": {
+              "Type": "Task",
+              "Resource": "arn:${AWS::Partition}:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "${IngestFunction.Arn}",
+                "Payload": {
+                  "action": "build_index"
+                }
+              },
+              "ResultPath": null,
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "States.ALL"
+                  ],
+                  "IntervalSeconds": 30,
+                  "MaxAttempts": 2,
+                  "BackoffRate": 2
+                }
+              ],
+              "Next": "Advance"
+            },
+            "Advance": {
+              "Type": "Pass",
+              "Parameters": {
+                "run_id.$": "$.run_id",
+                "manifest_key.$": "$.manifest_key",
+                "offset.$": "$.next_offset"
+              },
+              "Next": "LoadBatch"
+            },
+            "Finished": {
+              "Type": "Task",
+              "Resource": "arn:${AWS::Partition}:states:::lambda:invoke",
+              "Parameters": {"FunctionName": "${IngestFunction.Arn}", "Payload": {"action": "question_campaign_progress", "run_id.$": "$.run_id", "manifest_key.$": "$.manifest_key"}},
+              "OutputPath": "$.Payload",
+              "End": true
+            }
+          }
+        }
+
+  AuditBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireAuditLogs
+            Status: Enabled
+            ExpirationInDays: 400
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  AuditBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref AuditBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AWSCloudTrailAclCheck
+            Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action: s3:GetBucketAcl
+            Resource: !GetAtt AuditBucket.Arn
+            Condition:
+              StringEquals:
+                aws:SourceArn: !Sub "arn:${AWS::Partition}:cloudtrail:${AWS::Region}:${AWS::AccountId}:trail/${AWS::StackName}-wiki-edits"
+          - Sid: AWSCloudTrailWrite
+            Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action: s3:PutObject
+            Resource: !Sub "${AuditBucket.Arn}/AWSLogs/${AWS::AccountId}/*"
+            Condition:
+              StringEquals:
+                s3:x-amz-acl: bucket-owner-full-control
+                aws:SourceArn: !Sub "arn:${AWS::Partition}:cloudtrail:${AWS::Region}:${AWS::AccountId}:trail/${AWS::StackName}-wiki-edits"
+
+  WikiEditTrail:
+    Type: AWS::CloudTrail::Trail
+    DependsOn: AuditBucketPolicy
+    Properties:
+      TrailName: !Sub "${AWS::StackName}-wiki-edits"
+      S3BucketName: !Ref AuditBucket
+      IsLogging: true
+      IsMultiRegionTrail: false
+      IncludeGlobalServiceEvents: false
+      EnableLogFileValidation: true
+      AdvancedEventSelectors:
+        - Name: Writes to the synthesis layer
+          FieldSelectors:
+            - Field: eventCategory
+              Equals: [Data]
+            - Field: resources.type
+              Equals: ["AWS::S3::Object"]
+            - Field: readOnly
+              Equals: ["false"]
+            - Field: resources.ARN
+              StartsWith:
+                - !Sub "${DataBucket.Arn}/wiki/overviews/"
+                - !Sub "${DataBucket.Arn}/wiki/questions/"
+                - !Sub "${DataBucket.Arn}/wiki/concepts/"
+
+
+  # Nothing rebuilt the index on a schedule, so a page written today stayed unsearchable until
+  # someone ran aws-build-index. This is the AWS counterpart of the nightly job the local
+  # llm-wiki has run since August, and it takes no arguments for the same reason.
+  IndexRebuildRule:
+    Type: AWS::Events::Rule
+    Condition: HasIndexRebuildSchedule
+    Properties:
+      Description: Rebuild the wiki search index from the pages in S3
+      ScheduleExpression: !Ref IndexRebuildSchedule
+      State: ENABLED
+      Targets:
+        - Id: RebuildIndex
+          Arn: !GetAtt IngestFunction.Arn
+          Input: '{"action": "build_index"}'
+
+  IndexRebuildPermission:
+    Type: AWS::Lambda::Permission
+    Condition: HasIndexRebuildSchedule
+    Properties:
+      FunctionName: !Ref IngestFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt IndexRebuildRule.Arn
+
+Outputs:
+  AuditBucketName:
+    Value: !Ref AuditBucket
+  ExtractionClusterName:
+    Value: !Ref ExtractionCluster
+  ExtractionTaskDefinitionArn:
+    Value: !Ref ExtractionTaskDefinition
+  ExtractionSecurityGroupId:
+    Value: !Ref ExtractionSecurityGroup
+  ExtractionSubnetIds:
+    Value: !Join [",", !If [CreateOwnVpc, [!Ref ByeoriPublicSubnetA, !Ref ByeoriPublicSubnetB], !Ref ExtractionSubnets]]
+  AssetRepositoryUri:
+    Description: Where to push the figure-and-table image
+    Value: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.${AWS::URLSuffix}/${AssetRepository}"
+  AssetTaskDefinitionArn:
+    Value: !Ref AssetTaskDefinition
+  BucketName:
+    Value: !Ref DataBucket
+  TableName:
+    Value: !Ref CatalogTable
+  NotesStateMachineArn:
+    Description: State machine that writes the notes, so a run does not belong to a laptop
+    Value: !Ref NotesStateMachine
+  OpenAlexMatchStateMachineArn:
+    Description: Resumable DOI matching with rate-limit waits in AWS
+    Value: !Ref OpenAlexMatchStateMachine
+  IngestFunctionName:
+    Value: !Ref IngestFunction
+  OpenAlexApiKeyParameter:
+    Value: !Ref OpenAlexApiKeyParameterName
+  SynthesisFunctionName:
+    Value: !Ref SynthesisFunction
+  SynthesisStateMachineArn:
+    Description: State machine that plans and writes the synthesis layer for one scope
+    Value: !Ref SynthesisStateMachine
+  QuestionStateMachineArn:
+    Description: Parallel research questions with persisted results and search refresh between batches
+    Value: !Ref QuestionStateMachine
+  ExtractionExecutionRoleArn:
+    Value: !GetAtt [ExtractionExecutionRole, Arn]
+  ExtractionTaskRoleArn:
+    Value: !GetAtt [ExtractionTaskRole, Arn]

@@ -1,0 +1,233 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "Isolated Byeori Jev smoke and question triage evaluation. Read-only wiki access; no Bedrock or Lambda invocation.",
+  "Parameters": {
+    "ResultsBucket": {
+      "Type": "String"
+    },
+    "ArtifactBucket": {
+      "Type": "String"
+    },
+    "ArtifactKey": {
+      "Type": "String"
+    },
+    "JevApiKeyParameter": {
+      "Type": "String",
+      "Default": "/byeori/jev/api-key",
+      "AllowedValues": [
+        "/byeori/jev/api-key"
+      ]
+    },
+    "ParameterKmsKeyArn": {
+      "Type": "String"
+    }
+  },
+  "Resources": {
+    "LogGroup": {
+      "Type": "AWS::Logs::LogGroup",
+      "Properties": {
+        "LogGroupName": {
+          "Fn::Sub": "/aws/lambda/${AWS::StackName}"
+        },
+        "RetentionInDays": 7
+      }
+    },
+    "WorkerRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "lambda.amazonaws.com"
+              },
+              "Action": "sts:AssumeRole"
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "JevSmokeOnly",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Sid": "ReadOnlyJevKey",
+                  "Effect": "Allow",
+                  "Action": "ssm:GetParameter",
+                  "Resource": {
+                    "Fn::Sub": "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${JevApiKeyParameter}"
+                  }
+                },
+                {
+                  "Sid": "DecryptOnlyJevParameter",
+                  "Effect": "Allow",
+                  "Action": "kms:Decrypt",
+                  "Resource": {
+                    "Ref": "ParameterKmsKeyArn"
+                  },
+                  "Condition": {
+                    "StringEquals": {
+                      "kms:ViaService": {
+                        "Fn::Sub": "ssm.${AWS::Region}.${AWS::URLSuffix}"
+                      },
+                      "kms:EncryptionContext:PARAMETER_ARN": {
+                        "Fn::Sub": "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${JevApiKeyParameter}"
+                      }
+                    }
+                  }
+                },
+                {
+                  "Sid": "ReadOnlyTriageInputs",
+                  "Effect": "Allow",
+                  "Action": [
+                    "s3:GetObject",
+                    "s3:GetObjectVersion"
+                  ],
+                  "Resource": [
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:s3:::${ResultsBucket}/runs/questions/original-1437-20260921/manifest.json"
+                    },
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:s3:::${ResultsBucket}/index/wiki-index-v2.sqlite3"
+                    },
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:s3:::${ResultsBucket}/wiki/*"
+                    },
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:s3:::${ResultsBucket}/runs/jev-evaluations/triage-20260921-v1/*"
+                    }
+                  ]
+                },
+                {
+                  "Sid": "ListOnlyTriageExperimentKeys",
+                  "Effect": "Allow",
+                  "Action": "s3:ListBucket",
+                  "Resource": {
+                    "Fn::Sub": "arn:${AWS::Partition}:s3:::${ResultsBucket}"
+                  },
+                  "Condition": {
+                    "StringLike": {
+                      "s3:prefix": "runs/jev-evaluations/triage-20260921-v1/*"
+                    }
+                  }
+                },
+                {
+                  "Sid": "WriteOnlyExperimentReceipts",
+                  "Effect": "Allow",
+                  "Action": "s3:PutObject",
+                  "Resource": {
+                    "Fn::Sub": "arn:${AWS::Partition}:s3:::${ResultsBucket}/runs/jev-evaluations/*"
+                  }
+                },
+                {
+                  "Sid": "DenyOtherModelAndLambdaInvocation",
+                  "Effect": "Deny",
+                  "Action": [
+                    "bedrock:InvokeModel",
+                    "bedrock:InvokeModelWithResponseStream",
+                    "lambda:InvokeFunction"
+                  ],
+                  "Resource": "*"
+                },
+                {
+                  "Sid": "DenyWikiPublication",
+                  "Effect": "Deny",
+                  "Action": "s3:PutObject",
+                  "Resource": {
+                    "Fn::Sub": "arn:${AWS::Partition}:s3:::${ResultsBucket}/wiki/*"
+                  }
+                },
+                {
+                  "Sid": "LogOnlyThisFunction",
+                  "Effect": "Allow",
+                  "Action": [
+                    "logs:CreateLogStream",
+                    "logs:PutLogEvents"
+                  ],
+                  "Resource": {
+                    "Fn::GetAtt": [
+                      "LogGroup",
+                      "Arn"
+                    ]
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "Worker": {
+      "Type": "AWS::Lambda::Function",
+      "DependsOn": "LogGroup",
+      "Properties": {
+        "FunctionName": {
+          "Ref": "AWS::StackName"
+        },
+        "Runtime": "python3.12",
+        "Architectures": [
+          "arm64"
+        ],
+        "Handler": "index.handler",
+        "Role": {
+          "Fn::GetAtt": [
+            "WorkerRole",
+            "Arn"
+          ]
+        },
+        "Code": {
+          "S3Bucket": {
+            "Ref": "ArtifactBucket"
+          },
+          "S3Key": {
+            "Ref": "ArtifactKey"
+          }
+        },
+        "MemorySize": 512,
+        "Timeout": 120,
+        "ReservedConcurrentExecutions": 1,
+        "Environment": {
+          "Variables": {
+            "JEV_API_KEY_PARAMETER": {
+              "Ref": "JevApiKeyParameter"
+            },
+            "JEV_RESULTS_BUCKET": {
+              "Ref": "ResultsBucket"
+            }
+          }
+        }
+      }
+    }
+  },
+  "Outputs": {
+    "FunctionName": {
+      "Value": {
+        "Ref": "Worker"
+      }
+    },
+    "FunctionArn": {
+      "Value": {
+        "Fn::GetAtt": [
+          "Worker",
+          "Arn"
+        ]
+      }
+    },
+    "RoleArn": {
+      "Value": {
+        "Fn::GetAtt": [
+          "WorkerRole",
+          "Arn"
+        ]
+      }
+    },
+    "ResultsPrefix": {
+      "Value": {
+        "Fn::Sub": "s3://${ResultsBucket}/runs/jev-evaluations/"
+      }
+    }
+  }
+}

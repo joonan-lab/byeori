@@ -1,0 +1,26 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Import and retain the existing Byeori archive protection policy.
+Parameters:
+  ExistingBucketName:
+    Type: String
+    Description: Existing archive bucket. Import its policy without deleting or recreating it.
+Resources:
+  DataBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Bucket: !Ref ExistingBucketName
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: NoPermanentVersionDeletion
+            Effect: Deny
+            Principal: "*"
+            Action: s3:DeleteObjectVersion
+            Resource: !Sub "arn:${AWS::Partition}:s3:::${ExistingBucketName}/*"
+          - Sid: KeepVersioningAndBucket
+            Effect: Deny
+            Principal: "*"
+            Action: [s3:DeleteBucket, s3:PutBucketVersioning]
+            Resource: !Sub "arn:${AWS::Partition}:s3:::${ExistingBucketName}"

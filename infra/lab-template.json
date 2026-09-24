@@ -1,0 +1,1931 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "Byeori student question service (docs/LAB-QUESTION-WORKFLOW.md): AWS_IAM Function URL gateway, answer-only, triage and approved-research workers over the shared wiki, control table and queues. Only the research worker may write wiki pages, and only inside an approval's scope; no function may write papers/ or index/. The research event source is created only when ResearchConsumerEnabled is true.",
+  "Parameters": {
+    "DataBucket": {
+      "Type": "String",
+      "Description": "Existing Byeori data bucket: wiki, index and runs/lab-questions receipts"
+    },
+    "OutboxScheduleEnabled": {
+      "Type": "String",
+      "Default": "true",
+      "AllowedValues": [
+        "true",
+        "false"
+      ],
+      "Description": "true runs the outbox relay every minute (triage and offers follow answers automatically); false parks it"
+    },
+    "ArtifactBucket": {
+      "Type": "String",
+      "Description": "Bucket holding the zipped src/ package"
+    },
+    "ArtifactKey": {
+      "Type": "String",
+      "Description": "Key of the zipped src/ package (cfn/lab/<sha256>.zip)"
+    },
+    "JevApiKeyParameter": {
+      "Type": "String",
+      "Default": "/byeori/jev/api-key",
+      "AllowedValues": [
+        "/byeori/jev/api-key"
+      ]
+    },
+    "ParameterKmsKeyArn": {
+      "Type": "String",
+      "Description": "KMS key that encrypts the Jev SecureString parameter"
+    },
+    "AnswerModelId": {
+      "Type": "String",
+      "Default": "global.anthropic.claude-opus-5"
+    },
+    "AnswerReasoning": {
+      "Type": "String",
+      "Default": "high"
+    },
+    "PolicyRevision": {
+      "Type": "String",
+      "Default": "2026-09-21-v1"
+    },
+    "ResearchConsumerEnabled": {
+      "Type": "String",
+      "Default": "false",
+      "AllowedValues": [
+        "true",
+        "false"
+      ],
+      "Description": "true attaches the research queue to the research function and lets the relay send research rows; false keeps the code path inert"
+    },
+    "ResearchModelId": {
+      "Type": "String",
+      "Default": "global.anthropic.claude-opus-5",
+      "Description": "Bedrock model or inference profile the approved research worker calls"
+    },
+    "ResearchReasoning": {
+      "Type": "String",
+      "Default": "high",
+      "Description": "Adaptive-thinking effort for wiki-writing research (the user unified every model on Opus 5 at high, 2026-09-23)"
+    }
+  },
+  "Conditions": {
+    "OutboxScheduleOn": {
+      "Fn::Equals": [
+        {
+          "Ref": "OutboxScheduleEnabled"
+        },
+        "true"
+      ]
+    },
+    "ResearchEnabled": {
+      "Fn::Equals": [
+        {
+          "Ref": "ResearchConsumerEnabled"
+        },
+        "true"
+      ]
+    }
+  },
+  "Resources": {
+    "ControlTable": {
+      "Type": "AWS::DynamoDB::Table",
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain",
+      "Properties": {
+        "TableName": {
+          "Fn::Sub": "${AWS::StackName}-control"
+        },
+        "BillingMode": "PAY_PER_REQUEST",
+        "AttributeDefinitions": [
+          {
+            "AttributeName": "pk",
+            "AttributeType": "S"
+          },
+          {
+            "AttributeName": "sk",
+            "AttributeType": "S"
+          }
+        ],
+        "KeySchema": [
+          {
+            "AttributeName": "pk",
+            "KeyType": "HASH"
+          },
+          {
+            "AttributeName": "sk",
+            "KeyType": "RANGE"
+          }
+        ],
+        "PointInTimeRecoverySpecification": {
+          "PointInTimeRecoveryEnabled": true
+        },
+        "DeletionProtectionEnabled": true
+      }
+    },
+    "AnswerDeadLetterQueue": {
+      "Type": "AWS::SQS::Queue",
+      "Properties": {
+        "QueueName": {
+          "Fn::Sub": "${AWS::StackName}-answer-dlq"
+        },
+        "MessageRetentionPeriod": 1209600,
+        "SqsManagedSseEnabled": true
+      }
+    },
+    "AnswerQueue": {
+      "Type": "AWS::SQS::Queue",
+      "Properties": {
+        "QueueName": {
+          "Fn::Sub": "${AWS::StackName}-answer"
+        },
+        "VisibilityTimeout": 1080,
+        "MessageRetentionPeriod": 1209600,
+        "SqsManagedSseEnabled": true,
+        "RedrivePolicy": {
+          "deadLetterTargetArn": {
+            "Fn::GetAtt": [
+              "AnswerDeadLetterQueue",
+              "Arn"
+            ]
+          },
+          "maxReceiveCount": 5
+        }
+      }
+    },
+    "TriageDeadLetterQueue": {
+      "Type": "AWS::SQS::Queue",
+      "Properties": {
+        "QueueName": {
+          "Fn::Sub": "${AWS::StackName}-triage-dlq"
+        },
+        "MessageRetentionPeriod": 1209600,
+        "SqsManagedSseEnabled": true
+      }
+    },
+    "TriageQueue": {
+      "Type": "AWS::SQS::Queue",
+      "Properties": {
+        "QueueName": {
+          "Fn::Sub": "${AWS::StackName}-triage"
+        },
+        "VisibilityTimeout": 720,
+        "MessageRetentionPeriod": 1209600,
+        "SqsManagedSseEnabled": true,
+        "RedrivePolicy": {
+          "deadLetterTargetArn": {
+            "Fn::GetAtt": [
+              "TriageDeadLetterQueue",
+              "Arn"
+            ]
+          },
+          "maxReceiveCount": 3
+        }
+      }
+    },
+    "ResearchDeadLetterQueue": {
+      "Type": "AWS::SQS::Queue",
+      "Properties": {
+        "QueueName": {
+          "Fn::Sub": "${AWS::StackName}-research-dlq"
+        },
+        "MessageRetentionPeriod": 1209600,
+        "SqsManagedSseEnabled": true
+      }
+    },
+    "ResearchQueue": {
+      "Type": "AWS::SQS::Queue",
+      "Properties": {
+        "QueueName": {
+          "Fn::Sub": "${AWS::StackName}-research"
+        },
+        "VisibilityTimeout": 5400,
+        "MessageRetentionPeriod": 1209600,
+        "SqsManagedSseEnabled": true,
+        "RedrivePolicy": {
+          "deadLetterTargetArn": {
+            "Fn::GetAtt": [
+              "ResearchDeadLetterQueue",
+              "Arn"
+            ]
+          },
+          "maxReceiveCount": 3
+        }
+      }
+    },
+    "GatewayLogGroup": {
+      "Type": "AWS::Logs::LogGroup",
+      "Properties": {
+        "LogGroupName": {
+          "Fn::Sub": "/aws/lambda/${AWS::StackName}-gateway"
+        },
+        "RetentionInDays": 30
+      }
+    },
+    "AnswerLogGroup": {
+      "Type": "AWS::Logs::LogGroup",
+      "Properties": {
+        "LogGroupName": {
+          "Fn::Sub": "/aws/lambda/${AWS::StackName}-answer"
+        },
+        "RetentionInDays": 30
+      }
+    },
+    "TriageLogGroup": {
+      "Type": "AWS::Logs::LogGroup",
+      "Properties": {
+        "LogGroupName": {
+          "Fn::Sub": "/aws/lambda/${AWS::StackName}-triage"
+        },
+        "RetentionInDays": 30
+      }
+    },
+    "OutboxLogGroup": {
+      "Type": "AWS::Logs::LogGroup",
+      "Properties": {
+        "LogGroupName": {
+          "Fn::Sub": "/aws/lambda/${AWS::StackName}-outbox"
+        },
+        "RetentionInDays": 30
+      }
+    },
+    "ResearchLogGroup": {
+      "Type": "AWS::Logs::LogGroup",
+      "Properties": {
+        "LogGroupName": {
+          "Fn::Sub": "/aws/lambda/${AWS::StackName}-research"
+        },
+        "RetentionInDays": 30
+      }
+    },
+    "GatewayRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "lambda.amazonaws.com"
+              },
+              "Action": "sts:AssumeRole"
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "LabGateway",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Sid": "ControlTableItems",
+                  "Effect": "Allow",
+                  "Action": [
+                    "dynamodb:GetItem",
+                    "dynamodb:PutItem",
+                    "dynamodb:UpdateItem",
+                    "dynamodb:DeleteItem",
+                    "dynamodb:Query",
+                    "dynamodb:ConditionCheckItem"
+                  ],
+                  "Resource": {
+                    "Fn::GetAtt": [
+                      "ControlTable",
+                      "Arn"
+                    ]
+                  }
+                },
+                {
+                  "Sid": "ReadWikiIndexReceiptsAndSourceText",
+                  "Effect": "Allow",
+                  "Action": [
+                    "s3:GetObject",
+                    "s3:GetObjectVersion"
+                  ],
+                  "Resource": [
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:s3:::${DataBucket}/wiki/*"
+                    },
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:s3:::${DataBucket}/index/wiki-index-v2.sqlite3"
+                    },
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:s3:::${DataBucket}/runs/lab-questions/*"
+                    },
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:s3:::${DataBucket}/papers/*/clean.md"
+                    },
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:s3:::${DataBucket}/sources/*.md"
+                    }
+                  ]
+                },
+                {
+                  "Sid": "WriteReceiptsOnly",
+                  "Effect": "Allow",
+                  "Action": "s3:PutObject",
+                  "Resource": {
+                    "Fn::Sub": "arn:${AWS::Partition}:s3:::${DataBucket}/runs/lab-questions/*"
+                  }
+                },
+                {
+                  "Sid": "ListReceiptsAndWikiKeys",
+                  "Effect": "Allow",
+                  "Action": "s3:ListBucket",
+                  "Resource": {
+                    "Fn::Sub": "arn:${AWS::Partition}:s3:::${DataBucket}"
+                  },
+                  "Condition": {
+                    "StringLike": {
+                      "s3:prefix": [
+                        "runs/lab-questions/*",
+                        "wiki/*",
+                        "papers/*",
+                        "sources/*"
+                      ]
+                    }
+                  }
+                },
+                {
+                  "Sid": "QueueAnswerJobs",
+                  "Effect": "Allow",
+                  "Action": "sqs:SendMessage",
+                  "Resource": [
+                    {
+                      "Fn::GetAtt": [
+                        "AnswerQueue",
+                        "Arn"
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "Sid": "LogOnlyThisFunction",
+                  "Effect": "Allow",
+                  "Action": [
+                    "logs:CreateLogStream",
+                    "logs:PutLogEvents"
+                  ],
+                  "Resource": {
+                    "Fn::GetAtt": [
+                      "GatewayLogGroup",
+                      "Arn"
+                    ]
+                  }
+                },
+                {
+                  "Sid": "DenyWikiPaperAndIndexWrites",
+                  "Effect": "Deny",
+                  "Action": [
+                    "s3:PutObject",
+                    "s3:DeleteObject",
+                    "s3:DeleteObjectVersion",
+                    "s3:PutObjectAcl",
+                    "s3:PutObjectVersionAcl",
+                    "s3:PutObjectTagging",
+                    "s3:PutObjectVersionTagging",
+                    "s3:RestoreObject",
+                    "s3:AbortMultipartUpload",
+                    "s3:PutObjectRetention",
+                    "s3:PutObjectLegalHold"
+                  ],
+                  "Resource": [
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:s3:::${DataBucket}/wiki/*"
+                    },
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:s3:::${DataBucket}/papers/*"
+                    },
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:s3:::${DataBucket}/index/*"
+                    }
+                  ]
+                },
+                {
+                  "Sid": "DenyLambdaInvocation",
+                  "Effect": "Deny",
+                  "Action": [
+                    "lambda:InvokeFunction",
+                    "lambda:InvokeFunctionUrl",
+                    "lambda:InvokeAsync"
+                  ],
+                  "Resource": "*"
+                },
+                {
+                  "Sid": "DenyModelInvocation",
+                  "Effect": "Deny",
+                  "Action": [
+                    "bedrock:InvokeModel",
+                    "bedrock:InvokeModelWithResponseStream"
+                  ],
+                  "Resource": "*"
+                },
+                {
+                  "Sid": "DenyParameterReads",
+                  "Effect": "Deny",
+                  "Action": [
+                    "ssm:GetParameter",
+                    "ssm:GetParameters",
+                    "ssm:GetParametersByPath"
+                  ],
+                  "Resource": "*"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "AnswerRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "lambda.amazonaws.com"
+              },
+              "Action": "sts:AssumeRole"
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "LabAnswerWorker",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Sid": "InvokeAnthropicModelsOnly",
+                  "Effect": "Allow",
+                  "Action": "bedrock:InvokeModel",
+                  "Resource": [
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:bedrock:*::foundation-model/anthropic.*"
+                    },
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:bedrock:*:${AWS::AccountId}:inference-profile/*"
+                    }
+                  ]
+                },
+                {
+                  "Sid": "ControlTableItems",
+                  "Effect": "Allow",
+                  "Action": [
+                    "dynamodb:GetItem",
+                    "dynamodb:PutItem",
+                    "dynamodb:UpdateItem",
+                    "dynamodb:DeleteItem",
+                    "dynamodb:Query",
+                    "dynamodb:ConditionCheckItem"
+                  ],
+                  "Resource": {
+                    "Fn::GetAtt": [
+                      "ControlTable",
+                      "Arn"
+                    ]
+                  }
+                },
+                {
+                  "Sid": "ReadWikiPapersIndexAndReceipts",
+                  "Effect": "Allow",
+                  "Action": [
+                    "s3:GetObject",
+                    "s3:GetObjectVersion"
+                  ],
+                  "Resource": [
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:s3:::${DataBucket}/wiki/*"
+                    },
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:s3:::${DataBucket}/index/wiki-index-v2.sqlite3"
+                    },
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:s3:::${DataBucket}/runs/lab-questions/*"
+                    },
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:s3:::${DataBucket}/papers/*"
+                    }
+                  ]
+                },
+                {
+                  "Sid": "WriteReceiptsOnly",
+                  "Effect": "Allow",
+                  "Action": "s3:PutObject",
+                  "Resource": {
+                    "Fn::Sub": "arn:${AWS::Partition}:s3:::${DataBucket}/runs/lab-questions/*"
+                  }
+                },
+                {
+                  "Sid": "WriteLabQuestionPages",
+                  "Effect": "Allow",
+                  "Action": "s3:PutObject",
+                  "Resource": {
+                    "Fn::Sub": "arn:${AWS::Partition}:s3:::${DataBucket}/wiki/lab-questions/*"
+                  }
+                },
+                {
+                  "Sid": "ListReceiptsAndWikiKeys",
+                  "Effect": "Allow",
+                  "Action": "s3:ListBucket",
+                  "Resource": {
+                    "Fn::Sub": "arn:${AWS::Partition}:s3:::${DataBucket}"
+                  },
+                  "Condition": {
+                    "StringLike": {
+                      "s3:prefix": [
+                        "runs/lab-questions/*",
+                        "wiki/*"
+                      ]
+                    }
+                  }
+                },
+                {
+                  "Sid": "ConsumeAnswerQueue",
+                  "Effect": "Allow",
+                  "Action": [
+                    "sqs:ReceiveMessage",
+                    "sqs:DeleteMessage",
+                    "sqs:GetQueueAttributes",
+                    "sqs:ChangeMessageVisibility"
+                  ],
+                  "Resource": {
+                    "Fn::GetAtt": [
+                      "AnswerQueue",
+                      "Arn"
+                    ]
+                  }
+                },
+                {
+                  "Sid": "HandOffToTriage",
+                  "Effect": "Allow",
+                  "Action": "sqs:SendMessage",
+                  "Resource": [
+                    {
+                      "Fn::GetAtt": [
+                        "TriageQueue",
+                        "Arn"
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "Sid": "LogOnlyThisFunction",
+                  "Effect": "Allow",
+                  "Action": [
+                    "logs:CreateLogStream",
+                    "logs:PutLogEvents"
+                  ],
+                  "Resource": {
+                    "Fn::GetAtt": [
+                      "AnswerLogGroup",
+                      "Arn"
+                    ]
+                  }
+                },
+                {
+                  "Sid": "DenyPaperAndIndexWrites",
+                  "Effect": "Deny",
+                  "Action": [
+                    "s3:PutObject",
+                    "s3:DeleteObject",
+                    "s3:DeleteObjectVersion",
+                    "s3:PutObjectAcl",
+                    "s3:PutObjectVersionAcl",
+                    "s3:PutObjectTagging",
+                    "s3:PutObjectVersionTagging",
+                    "s3:RestoreObject",
+                    "s3:AbortMultipartUpload",
+                    "s3:PutObjectRetention",
+                    "s3:PutObjectLegalHold"
+                  ],
+                  "Resource": [
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:s3:::${DataBucket}/papers/*"
+                    },
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:s3:::${DataBucket}/index/*"
+                    }
+                  ]
+                },
+                {
+                  "Sid": "DenyWikiDeletionsAndMetadataChanges",
+                  "Effect": "Deny",
+                  "Action": [
+                    "s3:DeleteObject",
+                    "s3:DeleteObjectVersion",
+                    "s3:PutObjectAcl",
+                    "s3:PutObjectVersionAcl",
+                    "s3:PutObjectTagging",
+                    "s3:PutObjectVersionTagging",
+                    "s3:RestoreObject",
+                    "s3:AbortMultipartUpload",
+                    "s3:PutObjectRetention",
+                    "s3:PutObjectLegalHold"
+                  ],
+                  "Resource": [
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:s3:::${DataBucket}/wiki/*"
+                    }
+                  ]
+                },
+                {
+                  "Sid": "DenyLambdaInvocation",
+                  "Effect": "Deny",
+                  "Action": [
+                    "lambda:InvokeFunction",
+                    "lambda:InvokeFunctionUrl",
+                    "lambda:InvokeAsync"
+                  ],
+                  "Resource": "*"
+                },
+                {
+                  "Sid": "DenyParameterReads",
+                  "Effect": "Deny",
+                  "Action": [
+                    "ssm:GetParameter",
+                    "ssm:GetParameters",
+                    "ssm:GetParametersByPath"
+                  ],
+                  "Resource": "*"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "TriageRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "lambda.amazonaws.com"
+              },
+              "Action": "sts:AssumeRole"
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "LabTriageWorker",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Sid": "ReadOnlyJevKey",
+                  "Effect": "Allow",
+                  "Action": "ssm:GetParameter",
+                  "Resource": {
+                    "Fn::Sub": "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${JevApiKeyParameter}"
+                  }
+                },
+                {
+                  "Sid": "DecryptOnlyJevParameter",
+                  "Effect": "Allow",
+                  "Action": "kms:Decrypt",
+                  "Resource": {
+                    "Ref": "ParameterKmsKeyArn"
+                  },
+                  "Condition": {
+                    "StringEquals": {
+                      "kms:ViaService": {
+                        "Fn::Sub": "ssm.${AWS::Region}.${AWS::URLSuffix}"
+                      },
+                      "kms:EncryptionContext:PARAMETER_ARN": {
+                        "Fn::Sub": "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${JevApiKeyParameter}"
+                      }
+                    }
+                  }
+                },
+                {
+                  "Sid": "ControlTableItems",
+                  "Effect": "Allow",
+                  "Action": [
+                    "dynamodb:GetItem",
+                    "dynamodb:PutItem",
+                    "dynamodb:UpdateItem",
+                    "dynamodb:DeleteItem",
+                    "dynamodb:Query",
+                    "dynamodb:ConditionCheckItem"
+                  ],
+                  "Resource": {
+                    "Fn::GetAtt": [
+                      "ControlTable",
+                      "Arn"
+                    ]
+                  }
+                },
+                {
+                  "Sid": "ReadWikiIndexAndReceipts",
+                  "Effect": "Allow",
+                  "Action": [
+                    "s3:GetObject",
+                    "s3:GetObjectVersion"
+                  ],
+                  "Resource": [
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:s3:::${DataBucket}/wiki/*"
+                    },
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:s3:::${DataBucket}/index/wiki-index-v2.sqlite3"
+                    },
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:s3:::${DataBucket}/runs/lab-questions/*"
+                    }
+                  ]
+                },
+                {
+                  "Sid": "WriteReceiptsOnly",
+                  "Effect": "Allow",
+                  "Action": "s3:PutObject",
+                  "Resource": {
+                    "Fn::Sub": "arn:${AWS::Partition}:s3:::${DataBucket}/runs/lab-questions/*"
+                  }
+                },
+                {
+                  "Sid": "ListReceiptsAndWikiKeys",
+                  "Effect": "Allow",
+                  "Action": "s3:ListBucket",
+                  "Resource": {
+                    "Fn::Sub": "arn:${AWS::Partition}:s3:::${DataBucket}"
+                  },
+                  "Condition": {
+                    "StringLike": {
+                      "s3:prefix": [
+                        "runs/lab-questions/*",
+                        "wiki/*"
+                      ]
+                    }
+                  }
+                },
+                {
+                  "Sid": "ConsumeTriageQueue",
+                  "Effect": "Allow",
+                  "Action": [
+                    "sqs:ReceiveMessage",
+                    "sqs:DeleteMessage",
+                    "sqs:GetQueueAttributes",
+                    "sqs:ChangeMessageVisibility"
+                  ],
+                  "Resource": {
+                    "Fn::GetAtt": [
+                      "TriageQueue",
+                      "Arn"
+                    ]
+                  }
+                },
+                {
+                  "Sid": "LogOnlyThisFunction",
+                  "Effect": "Allow",
+                  "Action": [
+                    "logs:CreateLogStream",
+                    "logs:PutLogEvents"
+                  ],
+                  "Resource": {
+                    "Fn::GetAtt": [
+                      "TriageLogGroup",
+                      "Arn"
+                    ]
+                  }
+                },
+                {
+                  "Sid": "DenyWikiPaperAndIndexWrites",
+                  "Effect": "Deny",
+                  "Action": [
+                    "s3:PutObject",
+                    "s3:DeleteObject",
+                    "s3:DeleteObjectVersion",
+                    "s3:PutObjectAcl",
+                    "s3:PutObjectVersionAcl",
+                    "s3:PutObjectTagging",
+                    "s3:PutObjectVersionTagging",
+                    "s3:RestoreObject",
+                    "s3:AbortMultipartUpload",
+                    "s3:PutObjectRetention",
+                    "s3:PutObjectLegalHold"
+                  ],
+                  "Resource": [
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:s3:::${DataBucket}/wiki/*"
+                    },
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:s3:::${DataBucket}/papers/*"
+                    },
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:s3:::${DataBucket}/index/*"
+                    }
+                  ]
+                },
+                {
+                  "Sid": "DenyLambdaInvocation",
+                  "Effect": "Deny",
+                  "Action": [
+                    "lambda:InvokeFunction",
+                    "lambda:InvokeFunctionUrl",
+                    "lambda:InvokeAsync"
+                  ],
+                  "Resource": "*"
+                },
+                {
+                  "Sid": "DenyModelInvocation",
+                  "Effect": "Deny",
+                  "Action": [
+                    "bedrock:InvokeModel",
+                    "bedrock:InvokeModelWithResponseStream"
+                  ],
+                  "Resource": "*"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "OutboxRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "lambda.amazonaws.com"
+              },
+              "Action": "sts:AssumeRole"
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "LabOutboxRelay",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Sid": "OutboxRowsAndExpiredLeases",
+                  "Effect": "Allow",
+                  "Action": [
+                    "dynamodb:GetItem",
+                    "dynamodb:UpdateItem",
+                    "dynamodb:DeleteItem",
+                    "dynamodb:Query"
+                  ],
+                  "Resource": {
+                    "Fn::GetAtt": [
+                      "ControlTable",
+                      "Arn"
+                    ]
+                  }
+                },
+                {
+                  "Sid": "RelayToWorkQueues",
+                  "Effect": "Allow",
+                  "Action": "sqs:SendMessage",
+                  "Resource": [
+                    {
+                      "Fn::GetAtt": [
+                        "AnswerQueue",
+                        "Arn"
+                      ]
+                    },
+                    {
+                      "Fn::GetAtt": [
+                        "TriageQueue",
+                        "Arn"
+                      ]
+                    },
+                    {
+                      "Fn::GetAtt": [
+                        "ResearchQueue",
+                        "Arn"
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "Sid": "LogOnlyThisFunction",
+                  "Effect": "Allow",
+                  "Action": [
+                    "logs:CreateLogStream",
+                    "logs:PutLogEvents"
+                  ],
+                  "Resource": {
+                    "Fn::GetAtt": [
+                      "OutboxLogGroup",
+                      "Arn"
+                    ]
+                  }
+                },
+                {
+                  "Sid": "DenyWikiPaperAndIndexWrites",
+                  "Effect": "Deny",
+                  "Action": [
+                    "s3:PutObject",
+                    "s3:DeleteObject",
+                    "s3:DeleteObjectVersion",
+                    "s3:PutObjectAcl",
+                    "s3:PutObjectVersionAcl",
+                    "s3:PutObjectTagging",
+                    "s3:PutObjectVersionTagging",
+                    "s3:RestoreObject",
+                    "s3:AbortMultipartUpload",
+                    "s3:PutObjectRetention",
+                    "s3:PutObjectLegalHold"
+                  ],
+                  "Resource": [
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:s3:::${DataBucket}/wiki/*"
+                    },
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:s3:::${DataBucket}/papers/*"
+                    },
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:s3:::${DataBucket}/index/*"
+                    }
+                  ]
+                },
+                {
+                  "Sid": "DenyLambdaInvocation",
+                  "Effect": "Deny",
+                  "Action": [
+                    "lambda:InvokeFunction",
+                    "lambda:InvokeFunctionUrl",
+                    "lambda:InvokeAsync"
+                  ],
+                  "Resource": "*"
+                },
+                {
+                  "Sid": "DenyModelInvocation",
+                  "Effect": "Deny",
+                  "Action": [
+                    "bedrock:InvokeModel",
+                    "bedrock:InvokeModelWithResponseStream"
+                  ],
+                  "Resource": "*"
+                },
+                {
+                  "Sid": "DenyParameterReads",
+                  "Effect": "Deny",
+                  "Action": [
+                    "ssm:GetParameter",
+                    "ssm:GetParameters",
+                    "ssm:GetParametersByPath"
+                  ],
+                  "Resource": "*"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "ResearchRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "lambda.amazonaws.com"
+              },
+              "Action": "sts:AssumeRole"
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "LabResearchWorker",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Sid": "InvokeAnthropicModelsOnly",
+                  "Effect": "Allow",
+                  "Action": "bedrock:InvokeModel",
+                  "Resource": [
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:bedrock:*::foundation-model/anthropic.*"
+                    },
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:bedrock:*:${AWS::AccountId}:inference-profile/*"
+                    }
+                  ]
+                },
+                {
+                  "Sid": "ControlTableItems",
+                  "Effect": "Allow",
+                  "Action": [
+                    "dynamodb:GetItem",
+                    "dynamodb:PutItem",
+                    "dynamodb:UpdateItem",
+                    "dynamodb:DeleteItem",
+                    "dynamodb:Query",
+                    "dynamodb:ConditionCheckItem"
+                  ],
+                  "Resource": {
+                    "Fn::GetAtt": [
+                      "ControlTable",
+                      "Arn"
+                    ]
+                  }
+                },
+                {
+                  "Sid": "ReadWikiOriginalsIndexAndReceipts",
+                  "Effect": "Allow",
+                  "Action": [
+                    "s3:GetObject",
+                    "s3:GetObjectVersion"
+                  ],
+                  "Resource": [
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:s3:::${DataBucket}/wiki/*"
+                    },
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:s3:::${DataBucket}/papers/*"
+                    },
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:s3:::${DataBucket}/index/wiki-index-v2.sqlite3"
+                    },
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:s3:::${DataBucket}/runs/lab-questions/*"
+                    }
+                  ]
+                },
+                {
+                  "Sid": "ListReceiptsAndWikiKeys",
+                  "Effect": "Allow",
+                  "Action": "s3:ListBucket",
+                  "Resource": {
+                    "Fn::Sub": "arn:${AWS::Partition}:s3:::${DataBucket}"
+                  },
+                  "Condition": {
+                    "StringLike": {
+                      "s3:prefix": [
+                        "runs/lab-questions/*",
+                        "wiki/*"
+                      ]
+                    }
+                  }
+                },
+                {
+                  "Sid": "PublishScopedWikiPagesAndReceipts",
+                  "Effect": "Allow",
+                  "Action": "s3:PutObject",
+                  "Resource": [
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:s3:::${DataBucket}/wiki/concepts/*"
+                    },
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:s3:::${DataBucket}/wiki/overviews/*"
+                    },
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:s3:::${DataBucket}/wiki/questions/*"
+                    },
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:s3:::${DataBucket}/wiki/sources/*"
+                    },
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:s3:::${DataBucket}/wiki/index.md"
+                    },
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:s3:::${DataBucket}/wiki/indexes/*"
+                    },
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:s3:::${DataBucket}/runs/agents/*"
+                    },
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:s3:::${DataBucket}/runs/lab-questions/*"
+                    }
+                  ]
+                },
+                {
+                  "Sid": "ConsumeResearchQueue",
+                  "Effect": "Allow",
+                  "Action": [
+                    "sqs:ReceiveMessage",
+                    "sqs:DeleteMessage",
+                    "sqs:GetQueueAttributes",
+                    "sqs:ChangeMessageVisibility"
+                  ],
+                  "Resource": {
+                    "Fn::GetAtt": [
+                      "ResearchQueue",
+                      "Arn"
+                    ]
+                  }
+                },
+                {
+                  "Sid": "LogOnlyThisFunction",
+                  "Effect": "Allow",
+                  "Action": [
+                    "logs:CreateLogStream",
+                    "logs:PutLogEvents"
+                  ],
+                  "Resource": {
+                    "Fn::GetAtt": [
+                      "ResearchLogGroup",
+                      "Arn"
+                    ]
+                  }
+                },
+                {
+                  "Sid": "DenyPaperAndIndexWrites",
+                  "Effect": "Deny",
+                  "Action": [
+                    "s3:PutObject",
+                    "s3:DeleteObject",
+                    "s3:DeleteObjectVersion",
+                    "s3:PutObjectAcl",
+                    "s3:PutObjectVersionAcl",
+                    "s3:PutObjectTagging",
+                    "s3:PutObjectVersionTagging",
+                    "s3:RestoreObject",
+                    "s3:AbortMultipartUpload",
+                    "s3:PutObjectRetention",
+                    "s3:PutObjectLegalHold"
+                  ],
+                  "Resource": [
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:s3:::${DataBucket}/papers/*"
+                    },
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:s3:::${DataBucket}/index/*"
+                    }
+                  ]
+                },
+                {
+                  "Sid": "DenyWikiDeletionsAndMetadataChanges",
+                  "Effect": "Deny",
+                  "Action": [
+                    "s3:DeleteObject",
+                    "s3:DeleteObjectVersion",
+                    "s3:PutObjectAcl",
+                    "s3:PutObjectVersionAcl",
+                    "s3:PutObjectTagging",
+                    "s3:PutObjectVersionTagging",
+                    "s3:RestoreObject",
+                    "s3:AbortMultipartUpload",
+                    "s3:PutObjectRetention",
+                    "s3:PutObjectLegalHold"
+                  ],
+                  "Resource": [
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:s3:::${DataBucket}/wiki/*"
+                    }
+                  ]
+                },
+                {
+                  "Sid": "DenyLambdaInvocation",
+                  "Effect": "Deny",
+                  "Action": [
+                    "lambda:InvokeFunction",
+                    "lambda:InvokeFunctionUrl",
+                    "lambda:InvokeAsync"
+                  ],
+                  "Resource": "*"
+                },
+                {
+                  "Sid": "DenyStreamingModelInvocation",
+                  "Effect": "Deny",
+                  "Action": [
+                    "bedrock:InvokeModelWithResponseStream"
+                  ],
+                  "Resource": "*"
+                },
+                {
+                  "Sid": "DenyParameterReads",
+                  "Effect": "Deny",
+                  "Action": [
+                    "ssm:GetParameter",
+                    "ssm:GetParameters",
+                    "ssm:GetParametersByPath"
+                  ],
+                  "Resource": "*"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "GatewayFunction": {
+      "Type": "AWS::Lambda::Function",
+      "DependsOn": "GatewayLogGroup",
+      "Properties": {
+        "FunctionName": {
+          "Fn::Sub": "${AWS::StackName}-gateway"
+        },
+        "Description": "Verifies the IAM caller, records questions and serves bounded wiki reads",
+        "Runtime": "python3.12",
+        "Architectures": [
+          "arm64"
+        ],
+        "Handler": "byeori.lab_lambda.handler",
+        "Role": {
+          "Fn::GetAtt": [
+            "GatewayRole",
+            "Arn"
+          ]
+        },
+        "Code": {
+          "S3Bucket": {
+            "Ref": "ArtifactBucket"
+          },
+          "S3Key": {
+            "Ref": "ArtifactKey"
+          }
+        },
+        "MemorySize": 1024,
+        "Timeout": 60,
+        "Environment": {
+          "Variables": {
+            "LAB_TABLE": {
+              "Ref": "ControlTable"
+            },
+            "LAB_BUCKET": {
+              "Ref": "DataBucket"
+            },
+            "LAB_INDEX_KEY": "index/wiki-index-v2.sqlite3",
+            "LAB_ANSWER_MODEL_ID": {
+              "Ref": "AnswerModelId"
+            },
+            "LAB_ANSWER_REASONING": {
+              "Ref": "AnswerReasoning"
+            },
+            "LAB_JEV_PARAMETER": {
+              "Ref": "JevApiKeyParameter"
+            },
+            "LAB_ANSWER_QUEUE_URL": {
+              "Ref": "AnswerQueue"
+            },
+            "LAB_TRIAGE_QUEUE_URL": {
+              "Ref": "TriageQueue"
+            },
+            "LAB_RESEARCH_QUEUE_URL": {
+              "Ref": "ResearchQueue"
+            },
+            "LAB_POLICY_REVISION": {
+              "Ref": "PolicyRevision"
+            },
+            "LAB_HANDLER": "gateway",
+            "LAB_RESEARCH_CONSUMER_ENABLED": {
+              "Ref": "ResearchConsumerEnabled"
+            },
+            "LAB_RESEARCH_MODEL_ID": {
+              "Ref": "ResearchModelId"
+            },
+            "LAB_RESEARCH_REASONING": {
+              "Ref": "ResearchReasoning"
+            }
+          }
+        },
+        "ReservedConcurrentExecutions": 40
+      }
+    },
+    "GatewayUrl": {
+      "Type": "AWS::Lambda::Url",
+      "Properties": {
+        "TargetFunctionArn": {
+          "Fn::GetAtt": [
+            "GatewayFunction",
+            "Arn"
+          ]
+        },
+        "AuthType": "AWS_IAM",
+        "InvokeMode": "BUFFERED"
+      }
+    },
+    "GatewayUrlPermission": {
+      "Type": "AWS::Lambda::Permission",
+      "Properties": {
+        "Action": "lambda:InvokeFunctionUrl",
+        "FunctionName": {
+          "Ref": "GatewayFunction"
+        },
+        "FunctionUrlAuthType": "AWS_IAM",
+        "Principal": {
+          "Ref": "AWS::AccountId"
+        }
+      }
+    },
+    "AnswerFunction": {
+      "Type": "AWS::Lambda::Function",
+      "DependsOn": "AnswerLogGroup",
+      "Properties": {
+        "FunctionName": {
+          "Fn::Sub": "${AWS::StackName}-answer"
+        },
+        "Description": "Answer-only worker: bounded evidence packet, at most two model calls, zero wiki writes",
+        "Runtime": "python3.12",
+        "Architectures": [
+          "arm64"
+        ],
+        "Handler": "byeori.lab_lambda.handler",
+        "Role": {
+          "Fn::GetAtt": [
+            "AnswerRole",
+            "Arn"
+          ]
+        },
+        "Code": {
+          "S3Bucket": {
+            "Ref": "ArtifactBucket"
+          },
+          "S3Key": {
+            "Ref": "ArtifactKey"
+          }
+        },
+        "MemorySize": 1024,
+        "Timeout": 900,
+        "Environment": {
+          "Variables": {
+            "LAB_TABLE": {
+              "Ref": "ControlTable"
+            },
+            "LAB_BUCKET": {
+              "Ref": "DataBucket"
+            },
+            "LAB_INDEX_KEY": "index/wiki-index-v2.sqlite3",
+            "LAB_ANSWER_MODEL_ID": {
+              "Ref": "AnswerModelId"
+            },
+            "LAB_ANSWER_REASONING": {
+              "Ref": "AnswerReasoning"
+            },
+            "LAB_JEV_PARAMETER": {
+              "Ref": "JevApiKeyParameter"
+            },
+            "LAB_ANSWER_QUEUE_URL": {
+              "Ref": "AnswerQueue"
+            },
+            "LAB_TRIAGE_QUEUE_URL": {
+              "Ref": "TriageQueue"
+            },
+            "LAB_RESEARCH_QUEUE_URL": {
+              "Ref": "ResearchQueue"
+            },
+            "LAB_POLICY_REVISION": {
+              "Ref": "PolicyRevision"
+            },
+            "LAB_HANDLER": "answer",
+            "LAB_RESEARCH_CONSUMER_ENABLED": {
+              "Ref": "ResearchConsumerEnabled"
+            },
+            "LAB_RESEARCH_MODEL_ID": {
+              "Ref": "ResearchModelId"
+            },
+            "LAB_RESEARCH_REASONING": {
+              "Ref": "ResearchReasoning"
+            }
+          }
+        },
+        "ReservedConcurrentExecutions": 5
+      }
+    },
+    "AnswerEventSource": {
+      "Type": "AWS::Lambda::EventSourceMapping",
+      "Properties": {
+        "EventSourceArn": {
+          "Fn::GetAtt": [
+            "AnswerQueue",
+            "Arn"
+          ]
+        },
+        "FunctionName": {
+          "Ref": "AnswerFunction"
+        },
+        "BatchSize": 1,
+        "Enabled": true,
+        "FunctionResponseTypes": [
+          "ReportBatchItemFailures"
+        ],
+        "ScalingConfig": {
+          "MaximumConcurrency": 5
+        }
+      }
+    },
+    "TriageFunction": {
+      "Type": "AWS::Lambda::Function",
+      "DependsOn": "TriageLogGroup",
+      "Properties": {
+        "FunctionName": {
+          "Fn::Sub": "${AWS::StackName}-triage"
+        },
+        "Description": "Asynchronous Jev triage of saved answers; issues synthesis offers at the 0.99 cutoff",
+        "Runtime": "python3.12",
+        "Architectures": [
+          "arm64"
+        ],
+        "Handler": "byeori.lab_lambda.handler",
+        "Role": {
+          "Fn::GetAtt": [
+            "TriageRole",
+            "Arn"
+          ]
+        },
+        "Code": {
+          "S3Bucket": {
+            "Ref": "ArtifactBucket"
+          },
+          "S3Key": {
+            "Ref": "ArtifactKey"
+          }
+        },
+        "MemorySize": 1024,
+        "Timeout": 120,
+        "Environment": {
+          "Variables": {
+            "LAB_TABLE": {
+              "Ref": "ControlTable"
+            },
+            "LAB_BUCKET": {
+              "Ref": "DataBucket"
+            },
+            "LAB_INDEX_KEY": "index/wiki-index-v2.sqlite3",
+            "LAB_ANSWER_MODEL_ID": {
+              "Ref": "AnswerModelId"
+            },
+            "LAB_ANSWER_REASONING": {
+              "Ref": "AnswerReasoning"
+            },
+            "LAB_JEV_PARAMETER": {
+              "Ref": "JevApiKeyParameter"
+            },
+            "LAB_ANSWER_QUEUE_URL": {
+              "Ref": "AnswerQueue"
+            },
+            "LAB_TRIAGE_QUEUE_URL": {
+              "Ref": "TriageQueue"
+            },
+            "LAB_RESEARCH_QUEUE_URL": {
+              "Ref": "ResearchQueue"
+            },
+            "LAB_POLICY_REVISION": {
+              "Ref": "PolicyRevision"
+            },
+            "LAB_HANDLER": "triage",
+            "LAB_RESEARCH_CONSUMER_ENABLED": {
+              "Ref": "ResearchConsumerEnabled"
+            },
+            "LAB_RESEARCH_MODEL_ID": {
+              "Ref": "ResearchModelId"
+            },
+            "LAB_RESEARCH_REASONING": {
+              "Ref": "ResearchReasoning"
+            }
+          }
+        },
+        "ReservedConcurrentExecutions": 2
+      }
+    },
+    "TriageEventSource": {
+      "Type": "AWS::Lambda::EventSourceMapping",
+      "Properties": {
+        "EventSourceArn": {
+          "Fn::GetAtt": [
+            "TriageQueue",
+            "Arn"
+          ]
+        },
+        "FunctionName": {
+          "Ref": "TriageFunction"
+        },
+        "BatchSize": 1,
+        "Enabled": true,
+        "FunctionResponseTypes": [
+          "ReportBatchItemFailures"
+        ],
+        "ScalingConfig": {
+          "MaximumConcurrency": 2
+        }
+      }
+    },
+    "OutboxFunction": {
+      "Type": "AWS::Lambda::Function",
+      "DependsOn": "OutboxLogGroup",
+      "Properties": {
+        "FunctionName": {
+          "Fn::Sub": "${AWS::StackName}-outbox"
+        },
+        "Description": "Relays pending outbox rows to the work queues and marks them sent",
+        "Runtime": "python3.12",
+        "Architectures": [
+          "arm64"
+        ],
+        "Handler": "byeori.lab_lambda.handler",
+        "Role": {
+          "Fn::GetAtt": [
+            "OutboxRole",
+            "Arn"
+          ]
+        },
+        "Code": {
+          "S3Bucket": {
+            "Ref": "ArtifactBucket"
+          },
+          "S3Key": {
+            "Ref": "ArtifactKey"
+          }
+        },
+        "MemorySize": 256,
+        "Timeout": 60,
+        "Environment": {
+          "Variables": {
+            "LAB_TABLE": {
+              "Ref": "ControlTable"
+            },
+            "LAB_BUCKET": {
+              "Ref": "DataBucket"
+            },
+            "LAB_INDEX_KEY": "index/wiki-index-v2.sqlite3",
+            "LAB_ANSWER_MODEL_ID": {
+              "Ref": "AnswerModelId"
+            },
+            "LAB_ANSWER_REASONING": {
+              "Ref": "AnswerReasoning"
+            },
+            "LAB_JEV_PARAMETER": {
+              "Ref": "JevApiKeyParameter"
+            },
+            "LAB_ANSWER_QUEUE_URL": {
+              "Ref": "AnswerQueue"
+            },
+            "LAB_TRIAGE_QUEUE_URL": {
+              "Ref": "TriageQueue"
+            },
+            "LAB_RESEARCH_QUEUE_URL": {
+              "Ref": "ResearchQueue"
+            },
+            "LAB_POLICY_REVISION": {
+              "Ref": "PolicyRevision"
+            },
+            "LAB_HANDLER": "outbox",
+            "LAB_RESEARCH_CONSUMER_ENABLED": {
+              "Ref": "ResearchConsumerEnabled"
+            },
+            "LAB_RESEARCH_MODEL_ID": {
+              "Ref": "ResearchModelId"
+            },
+            "LAB_RESEARCH_REASONING": {
+              "Ref": "ResearchReasoning"
+            }
+          }
+        },
+        "ReservedConcurrentExecutions": 1
+      }
+    },
+    "OutboxRule": {
+      "Type": "AWS::Events::Rule",
+      "Properties": {
+        "Description": "Outbox relay schedule; enabled since the user opened the service on 2026-09-22, parked with OutboxScheduleEnabled=false",
+        "ScheduleExpression": "rate(1 minute)",
+        "State": {
+          "Fn::If": [
+            "OutboxScheduleOn",
+            "ENABLED",
+            "DISABLED"
+          ]
+        },
+        "Targets": [
+          {
+            "Arn": {
+              "Fn::GetAtt": [
+                "OutboxFunction",
+                "Arn"
+              ]
+            },
+            "Id": "outbox"
+          }
+        ]
+      }
+    },
+    "OutboxPermission": {
+      "Type": "AWS::Lambda::Permission",
+      "Properties": {
+        "Action": "lambda:InvokeFunction",
+        "FunctionName": {
+          "Ref": "OutboxFunction"
+        },
+        "Principal": "events.amazonaws.com",
+        "SourceArn": {
+          "Fn::GetAtt": [
+            "OutboxRule",
+            "Arn"
+          ]
+        }
+      }
+    },
+    "ResearchFunction": {
+      "Type": "AWS::Lambda::Function",
+      "DependsOn": "ResearchLogGroup",
+      "Properties": {
+        "FunctionName": {
+          "Fn::Sub": "${AWS::StackName}-research"
+        },
+        "Description": "Approved research worker: one attempt reservation, the campaign engine under a scoped publisher, receipts under runs/lab-questions/; consumes its queue only when ResearchConsumerEnabled is true",
+        "Runtime": "python3.12",
+        "Architectures": [
+          "arm64"
+        ],
+        "Handler": "byeori.lab_lambda.handler",
+        "Role": {
+          "Fn::GetAtt": [
+            "ResearchRole",
+            "Arn"
+          ]
+        },
+        "Code": {
+          "S3Bucket": {
+            "Ref": "ArtifactBucket"
+          },
+          "S3Key": {
+            "Ref": "ArtifactKey"
+          }
+        },
+        "MemorySize": 1024,
+        "Timeout": 900,
+        "Environment": {
+          "Variables": {
+            "LAB_TABLE": {
+              "Ref": "ControlTable"
+            },
+            "LAB_BUCKET": {
+              "Ref": "DataBucket"
+            },
+            "LAB_INDEX_KEY": "index/wiki-index-v2.sqlite3",
+            "LAB_ANSWER_MODEL_ID": {
+              "Ref": "AnswerModelId"
+            },
+            "LAB_ANSWER_REASONING": {
+              "Ref": "AnswerReasoning"
+            },
+            "LAB_JEV_PARAMETER": {
+              "Ref": "JevApiKeyParameter"
+            },
+            "LAB_ANSWER_QUEUE_URL": {
+              "Ref": "AnswerQueue"
+            },
+            "LAB_TRIAGE_QUEUE_URL": {
+              "Ref": "TriageQueue"
+            },
+            "LAB_RESEARCH_QUEUE_URL": {
+              "Ref": "ResearchQueue"
+            },
+            "LAB_POLICY_REVISION": {
+              "Ref": "PolicyRevision"
+            },
+            "LAB_HANDLER": "research",
+            "LAB_RESEARCH_CONSUMER_ENABLED": {
+              "Ref": "ResearchConsumerEnabled"
+            },
+            "LAB_RESEARCH_MODEL_ID": {
+              "Ref": "ResearchModelId"
+            },
+            "LAB_RESEARCH_REASONING": {
+              "Ref": "ResearchReasoning"
+            }
+          }
+        },
+        "ReservedConcurrentExecutions": 2
+      }
+    },
+    "ResearchEventSource": {
+      "Type": "AWS::Lambda::EventSourceMapping",
+      "Condition": "ResearchEnabled",
+      "Properties": {
+        "EventSourceArn": {
+          "Fn::GetAtt": [
+            "ResearchQueue",
+            "Arn"
+          ]
+        },
+        "FunctionName": {
+          "Ref": "ResearchFunction"
+        },
+        "BatchSize": 1,
+        "Enabled": true,
+        "FunctionResponseTypes": [
+          "ReportBatchItemFailures"
+        ],
+        "ScalingConfig": {
+          "MaximumConcurrency": 2
+        }
+      }
+    },
+    "StudentAccessPolicy": {
+      "Type": "AWS::IAM::ManagedPolicy",
+      "Properties": {
+        "Description": "Students: invoke the Byeori gateway URL with IAM auth, nothing else",
+        "PolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Sid": "InvokeGatewayUrl",
+              "Effect": "Allow",
+              "Action": "lambda:InvokeFunctionUrl",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "GatewayFunction",
+                  "Arn"
+                ]
+              },
+              "Condition": {
+                "StringEquals": {
+                  "lambda:FunctionUrlAuthType": "AWS_IAM"
+                }
+              }
+            },
+            {
+              "Sid": "InvokeGatewayViaUrlOnly",
+              "Effect": "Allow",
+              "Action": "lambda:InvokeFunction",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "GatewayFunction",
+                  "Arn"
+                ]
+              },
+              "Condition": {
+                "Bool": {
+                  "lambda:InvokedViaFunctionUrl": "true"
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "AdminAccessPolicy": {
+      "Type": "AWS::IAM::ManagedPolicy",
+      "Properties": {
+        "Description": "Administrators: gateway URL, member registry maintenance, receipt reads and manual outbox relay",
+        "PolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Sid": "InvokeGatewayUrl",
+              "Effect": "Allow",
+              "Action": "lambda:InvokeFunctionUrl",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "GatewayFunction",
+                  "Arn"
+                ]
+              },
+              "Condition": {
+                "StringEquals": {
+                  "lambda:FunctionUrlAuthType": "AWS_IAM"
+                }
+              }
+            },
+            {
+              "Sid": "InvokeGatewayViaUrlOnly",
+              "Effect": "Allow",
+              "Action": "lambda:InvokeFunction",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "GatewayFunction",
+                  "Arn"
+                ]
+              },
+              "Condition": {
+                "Bool": {
+                  "lambda:InvokedViaFunctionUrl": "true"
+                }
+              }
+            },
+            {
+              "Sid": "MaintainMemberRegistry",
+              "Effect": "Allow",
+              "Action": [
+                "dynamodb:GetItem",
+                "dynamodb:PutItem",
+                "dynamodb:UpdateItem",
+                "dynamodb:Query"
+              ],
+              "Resource": {
+                "Fn::GetAtt": [
+                  "ControlTable",
+                  "Arn"
+                ]
+              },
+              "Condition": {
+                "ForAllValues:StringLike": {
+                  "dynamodb:LeadingKeys": [
+                    "MEMBER#*",
+                    "PRINCIPAL#*",
+                    "BUDGET#*"
+                  ]
+                }
+              }
+            },
+            {
+              "Sid": "ReadReceipts",
+              "Effect": "Allow",
+              "Action": [
+                "s3:GetObject",
+                "s3:GetObjectVersion"
+              ],
+              "Resource": {
+                "Fn::Sub": "arn:${AWS::Partition}:s3:::${DataBucket}/runs/lab-questions/*"
+              }
+            },
+            {
+              "Sid": "ListReceipts",
+              "Effect": "Allow",
+              "Action": "s3:ListBucket",
+              "Resource": {
+                "Fn::Sub": "arn:${AWS::Partition}:s3:::${DataBucket}"
+              },
+              "Condition": {
+                "StringLike": {
+                  "s3:prefix": "runs/lab-questions/*"
+                }
+              }
+            },
+            {
+              "Sid": "RelayOutboxManually",
+              "Effect": "Allow",
+              "Action": "lambda:InvokeFunction",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "OutboxFunction",
+                  "Arn"
+                ]
+              }
+            }
+          ]
+        }
+      }
+    }
+  },
+  "Outputs": {
+    "GatewayUrl": {
+      "Description": "Function URL the student MCP client signs requests for",
+      "Value": {
+        "Fn::GetAtt": [
+          "GatewayUrl",
+          "FunctionUrl"
+        ]
+      }
+    },
+    "GatewayFunctionArn": {
+      "Value": {
+        "Fn::GetAtt": [
+          "GatewayFunction",
+          "Arn"
+        ]
+      }
+    },
+    "ControlTableName": {
+      "Value": {
+        "Ref": "ControlTable"
+      }
+    },
+    "AnswerQueueUrl": {
+      "Value": {
+        "Ref": "AnswerQueue"
+      }
+    },
+    "TriageQueueUrl": {
+      "Value": {
+        "Ref": "TriageQueue"
+      }
+    },
+    "ResearchQueueUrl": {
+      "Description": "Research queue; its consumer is attached only when ResearchConsumerEnabled is true",
+      "Value": {
+        "Ref": "ResearchQueue"
+      }
+    },
+    "OutboxFunctionName": {
+      "Value": {
+        "Ref": "OutboxFunction"
+      }
+    },
+    "StudentAccessPolicyArn": {
+      "Value": {
+        "Ref": "StudentAccessPolicy"
+      }
+    },
+    "AdminAccessPolicyArn": {
+      "Value": {
+        "Ref": "AdminAccessPolicy"
+      }
+    },
+    "ReceiptsPrefix": {
+      "Value": {
+        "Fn::Sub": "s3://${DataBucket}/runs/lab-questions/"
+      }
+    }
+  }
+}

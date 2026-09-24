@@ -1,0 +1,675 @@
+{
+  "journals": {
+    "nature": {
+      "title": "Nature",
+      "family": "Nature",
+      "issns": [
+        "0028-0836",
+        "1476-4687"
+      ],
+      "source_id": "S137773608"
+    },
+    "nature biomedical engineering": {
+      "title": "Nature Biomedical Engineering",
+      "family": "Nature portfolio",
+      "issns": [
+        "2157-846X"
+      ],
+      "source_id": "S2764624792"
+    },
+    "nature genetics": {
+      "title": "Nature Genetics",
+      "family": "Nature portfolio",
+      "issns": [
+        "1061-4036",
+        "1546-1718"
+      ],
+      "source_id": "S137905309"
+    },
+    "nature medicine": {
+      "title": "Nature Medicine",
+      "family": "Nature portfolio",
+      "issns": [
+        "1078-8956",
+        "1546-170X"
+      ],
+      "source_id": "S203256638"
+    },
+    "nature machine intelligence": {
+      "title": "Nature Machine Intelligence",
+      "family": "Nature portfolio",
+      "issns": [
+        "2522-5839"
+      ],
+      "source_id": "S2912241403"
+    },
+    "nature communications": {
+      "title": "Nature Communications",
+      "family": "Nature portfolio",
+      "issns": [
+        "2041-1723"
+      ],
+      "source_id": "S64187185"
+    },
+    "nature human behaviour": {
+      "title": "Nature Human Behaviour",
+      "family": "Nature portfolio",
+      "issns": [
+        "2397-3374"
+      ],
+      "source_id": "S2764866340"
+    },
+    "nature nanotechnology": {
+      "title": "Nature Nanotechnology",
+      "family": "Nature portfolio",
+      "issns": [
+        "1748-3387",
+        "1748-3395"
+      ],
+      "source_id": "S7822423"
+    },
+    "nature neuroscience": {
+      "title": "Nature Neuroscience",
+      "family": "Nature portfolio",
+      "issns": [
+        "1097-6256",
+        "1546-1726"
+      ],
+      "source_id": "S2298632"
+    },
+    "nature cell biology": {
+      "title": "Nature Cell Biology",
+      "family": "Nature portfolio",
+      "issns": [
+        "1465-7392",
+        "1476-4679"
+      ],
+      "source_id": "S151741590"
+    },
+    "nature immunology": {
+      "title": "Nature Immunology",
+      "family": "Nature portfolio",
+      "issns": [
+        "1529-2908",
+        "1529-2916"
+      ],
+      "source_id": "S41063453"
+    },
+    "npj digital medicine": {
+      "title": "npj Digital Medicine",
+      "family": "Nature portfolio",
+      "issns": [
+        "2398-6352"
+      ],
+      "source_id": "S4210195431"
+    },
+    "science": {
+      "title": "Science",
+      "family": "Science",
+      "issns": [
+        "0036-8075",
+        "1095-9203"
+      ],
+      "source_id": "S3880285"
+    },
+    "science translational medicine": {
+      "title": "Science Translational Medicine",
+      "family": "Science",
+      "issns": [
+        "1946-6234",
+        "1946-6242"
+      ],
+      "source_id": "S24207032"
+    },
+    "cell": {
+      "title": "Cell",
+      "family": "Cell Press",
+      "issns": [
+        "0092-8674",
+        "1097-4172"
+      ],
+      "source_id": "S110447773"
+    },
+    "cell genomics": {
+      "title": "Cell Genomics",
+      "family": "Cell Press",
+      "issns": [
+        "2666-979X"
+      ],
+      "source_id": "S4210194377"
+    },
+    "neuron": {
+      "title": "Neuron",
+      "family": "Cell Press",
+      "issns": [
+        "0896-6273",
+        "1097-4199"
+      ],
+      "source_id": "S45757444"
+    },
+    "immunity": {
+      "title": "Immunity",
+      "family": "Cell Press",
+      "issns": [
+        "1074-7613"
+      ],
+      "source_id": "S199671312"
+    },
+    "cancer discovery": {
+      "title": "Cancer Discovery",
+      "family": "AACR",
+      "issns": [
+        "2159-8274",
+        "2159-8290"
+      ],
+      "source_id": "S2486275289"
+    },
+    "cancer research": {
+      "title": "Cancer Research",
+      "family": "AACR",
+      "issns": [
+        "0008-5472",
+        "1538-7445"
+      ],
+      "source_id": "S168522863"
+    },
+    "cancer cell": {
+      "title": "Cancer Cell",
+      "family": "Cell Press",
+      "issns": [
+        "1535-6108"
+      ],
+      "source_id": "S25671836"
+    },
+    "genome medicine": {
+      "title": "Genome Medicine",
+      "family": "Genome Medicine / Genome Biology",
+      "issns": [
+        "1756-994X"
+      ],
+      "source_id": "S149201819"
+    },
+    "genome biology": {
+      "title": "Genome Biology",
+      "family": "Genome Medicine / Genome Biology",
+      "issns": [
+        "1474-760X"
+      ],
+      "source_id": "S81160022"
+    },
+    "jama": {
+      "title": "JAMA",
+      "family": "JAMA",
+      "issns": [
+        "0098-7484",
+        "1538-3598"
+      ],
+      "source_id": "S172573765"
+    },
+    "jama psychiatry": {
+      "title": "JAMA Psychiatry",
+      "family": "JAMA",
+      "issns": [
+        "2168-622X",
+        "2168-6238"
+      ],
+      "source_id": "S2495708506"
+    },
+    "jama neurology": {
+      "title": "JAMA Neurology",
+      "family": "JAMA",
+      "issns": [
+        "2168-6149"
+      ],
+      "source_id": "S164389565"
+    },
+    "jama network open": {
+      "title": "JAMA Network Open",
+      "family": "JAMA",
+      "issns": [
+        "2574-3805"
+      ],
+      "source_id": "S4210217848"
+    },
+    "jama oncology": {
+      "title": "JAMA Oncology",
+      "family": "JAMA",
+      "issns": [
+        "2374-2437"
+      ],
+      "source_id": "S2756165422"
+    },
+    "new england journal of medicine": {
+      "title": "New England Journal of Medicine",
+      "family": "NEJM",
+      "issns": [
+        "0028-4793",
+        "1533-4406"
+      ],
+      "source_id": "S62468778"
+    },
+    "nejm evidence": {
+      "title": "NEJM Evidence",
+      "family": "NEJM",
+      "issns": [
+        "2766-5526"
+      ],
+      "source_id": "S4210196357"
+    },
+    "nejm ai": {
+      "title": "NEJM AI",
+      "family": "NEJM",
+      "issns": [
+        "2836-9386"
+      ],
+      "source_id": "S4389157821"
+    },
+    "lancet": {
+      "title": "The Lancet",
+      "family": "Lancet",
+      "issns": [
+        "0140-6736",
+        "1474-547X"
+      ],
+      "source_id": "S49861241"
+    },
+    "lancet psychiatry": {
+      "title": "The Lancet Psychiatry",
+      "family": "Lancet",
+      "issns": [
+        "2215-0366"
+      ],
+      "source_id": "S2531556786"
+    },
+    "lancet neurology": {
+      "title": "The Lancet Neurology",
+      "family": "Lancet",
+      "issns": [
+        "1474-4422"
+      ],
+      "source_id": "S70053155"
+    },
+    "lancet digital health": {
+      "title": "The Lancet Digital Health",
+      "family": "Lancet",
+      "issns": [
+        "2589-7500"
+      ],
+      "source_id": "S4210237014"
+    },
+    "lancet oncology": {
+      "title": "The Lancet Oncology",
+      "family": "Lancet",
+      "issns": [
+        "1470-2045"
+      ],
+      "source_id": "S116900674"
+    },
+    "annals of oncology": {
+      "title": "Annals of Oncology",
+      "family": "ESMO",
+      "issns": [
+        "0923-7534",
+        "1569-8041"
+      ],
+      "source_id": "S41454044"
+    },
+    "journal of clinical oncology": {
+      "title": "Journal of Clinical Oncology",
+      "family": "ASCO",
+      "issns": [
+        "0732-183X",
+        "1527-7755"
+      ],
+      "source_id": "S15137598"
+    },
+    "biological psychiatry": {
+      "title": "Biological Psychiatry",
+      "family": "Psychiatry",
+      "issns": [
+        "0006-3223"
+      ],
+      "source_id": "S205482884"
+    },
+    "molecular psychiatry": {
+      "title": "Molecular Psychiatry",
+      "family": "Nature portfolio",
+      "issns": [
+        "1359-4184",
+        "1476-5578"
+      ],
+      "source_id": "S71149355"
+    },
+    "american journal of psychiatry": {
+      "title": "American Journal of Psychiatry",
+      "family": "Psychiatry",
+      "issns": [
+        "0002-953X",
+        "1535-7228"
+      ],
+      "source_id": "S116025658"
+    },
+    "world psychiatry": {
+      "title": "World Psychiatry",
+      "family": "Psychiatry",
+      "issns": [
+        "1723-8617",
+        "2051-5545"
+      ],
+      "source_id": "S183644930"
+    },
+    "nature cancer": {
+      "title": "Nature Cancer",
+      "family": "Nature portfolio",
+      "issns": [
+        "2662-1347"
+      ],
+      "source_id": "S4210236562"
+    },
+    "nature biotechnology": {
+      "title": "Nature Biotechnology",
+      "family": "Nature portfolio",
+      "issns": [
+        "1087-0156",
+        "1546-1696"
+      ],
+      "source_id": "S106963461"
+    },
+    "cell metabolism": {
+      "title": "Cell Metabolism",
+      "family": "Cell Press",
+      "issns": [
+        "1550-4131"
+      ],
+      "source_id": "S177533077"
+    },
+    "eclinicalmedicine": {
+      "title": "eClinicalMedicine",
+      "family": "Lancet",
+      "issns": [
+        "2589-5370"
+      ],
+      "source_id": "S2898347799"
+    },
+    "ebiomedicine": {
+      "title": "eBioMedicine",
+      "family": "Lancet",
+      "issns": [
+        "2352-3964"
+      ],
+      "source_id": "S2531685872"
+    },
+    "american journal of human genetics": {
+      "title": "The American Journal of Human Genetics",
+      "family": "Cell Press",
+      "issns": [
+        "0002-9297",
+        "1537-6605"
+      ],
+      "source_id": "S134425043"
+    },
+    "jama internal medicine": {
+      "title": "JAMA Internal Medicine",
+      "family": "JAMA",
+      "issns": [
+        "2168-6106",
+        "2168-6114"
+      ],
+      "source_id": "S65364685"
+    },
+    "jama pediatrics": {
+      "title": "JAMA Pediatrics",
+      "family": "JAMA",
+      "issns": [
+        "2168-6203",
+        "2168-6211"
+      ],
+      "source_id": "S4210192535"
+    },
+    "nature aging": {
+      "title": "Nature Aging",
+      "family": "Nature portfolio",
+      "issns": [
+        "2662-8465"
+      ],
+      "source_id": "S4210214063"
+    },
+    "nature chemical biology": {
+      "title": "Nature Chemical Biology",
+      "family": "Nature portfolio",
+      "issns": [
+        "1552-4450",
+        "1552-4469"
+      ],
+      "source_id": "S51309854"
+    },
+    "nature mental health": {
+      "title": "Nature Mental Health",
+      "family": "Nature portfolio",
+      "issns": [
+        "2731-6076"
+      ],
+      "source_id": "S4387286578"
+    },
+    "nature metabolism": {
+      "title": "Nature Metabolism",
+      "family": "Nature portfolio",
+      "issns": [
+        "2522-5812"
+      ],
+      "source_id": "S4210232714"
+    },
+    "nature methods": {
+      "title": "Nature Methods",
+      "family": "Nature portfolio",
+      "issns": [
+        "1548-7091",
+        "1548-7105"
+      ],
+      "source_id": "S127827428"
+    },
+    "nature protocols": {
+      "title": "Nature Protocols",
+      "family": "Nature portfolio",
+      "issns": [
+        "1750-2799",
+        "1754-2189"
+      ],
+      "source_id": "S109387254"
+    },
+    "nature reviews cancer": {
+      "title": "Nature Reviews Cancer",
+      "family": "Nature portfolio",
+      "issns": [
+        "1474-175X",
+        "1474-1768"
+      ],
+      "source_id": "S160464432"
+    },
+    "nature reviews disease primers": {
+      "title": "Nature Reviews Disease Primers",
+      "family": "Nature portfolio",
+      "issns": [
+        "2056-676X"
+      ],
+      "source_id": "S4210201506"
+    },
+    "nature reviews drug discovery": {
+      "title": "Nature Reviews Drug Discovery",
+      "family": "Nature portfolio",
+      "issns": [
+        "1474-1776",
+        "1474-1784"
+      ],
+      "source_id": "S186543748"
+    },
+    "nature reviews genetics": {
+      "title": "Nature Reviews Genetics",
+      "family": "Nature portfolio",
+      "issns": [
+        "1471-0056",
+        "1471-0064"
+      ],
+      "source_id": "S8553189"
+    },
+    "nature reviews immunology": {
+      "title": "Nature Reviews Immunology",
+      "family": "Nature portfolio",
+      "issns": [
+        "1474-1733",
+        "1474-1741"
+      ],
+      "source_id": "S93373720"
+    },
+    "nature reviews molecular cell biology": {
+      "title": "Nature Reviews Molecular Cell Biology",
+      "family": "Nature portfolio",
+      "issns": [
+        "1471-0072",
+        "1471-0080"
+      ],
+      "source_id": "S196724125"
+    },
+    "nature reviews neurology": {
+      "title": "Nature Reviews Neurology",
+      "family": "Nature portfolio",
+      "issns": [
+        "1759-4758",
+        "1759-4766"
+      ],
+      "source_id": "S22232893"
+    },
+    "nature reviews neuroscience": {
+      "title": "Nature Reviews Neuroscience",
+      "family": "Nature portfolio",
+      "issns": [
+        "1471-003X",
+        "1471-0048"
+      ],
+      "source_id": "S26843219"
+    },
+    "nature structural molecular biology": {
+      "title": "Nature Structural & Molecular Biology",
+      "family": "Nature portfolio",
+      "issns": [
+        "1545-9985",
+        "1545-9993"
+      ],
+      "source_id": "S139253143"
+    }
+  },
+  "lab_additions": {
+    "journal of data science": {
+      "title": "Journal of Data Science",
+      "family": "Byeori reading list",
+      "issns": [
+        "1680-743X",
+        "1683-8602"
+      ],
+      "source_ids": [
+        "S2764553900"
+      ]
+    },
+    "international conference on learning representations": {
+      "title": "International Conference on Learning Representations",
+      "family": "Machine learning conference",
+      "issns": [],
+      "source_ids": [
+        "S4306419637"
+      ]
+    },
+    "neural information processing systems": {
+      "title": "Neural Information Processing Systems",
+      "family": "Machine learning conference",
+      "issns": [
+        "1049-5258"
+      ],
+      "source_ids": [
+        "S4306420609",
+        "S4363606243"
+      ]
+    },
+    "international conference on machine learning": {
+      "title": "International Conference on Machine Learning",
+      "family": "Machine learning conference",
+      "issns": [],
+      "source_ids": [
+        "S4306419644"
+      ]
+    },
+    "proceedings of machine learning research": {
+      "title": "Proceedings of Machine Learning Research",
+      "family": "Machine learning conference",
+      "issns": [
+        "2640-3498"
+      ],
+      "source_ids": [
+        "S4363608721"
+      ]
+    },
+    "international conference on artificial intelligence and statistics": {
+      "title": "International Conference on Artificial Intelligence and Statistics",
+      "family": "Machine learning conference",
+      "issns": [],
+      "source_ids": [
+        "S4306419146"
+      ]
+    },
+    "conference on learning theory": {
+      "title": "Conference on Learning Theory",
+      "family": "Machine learning conference",
+      "issns": [],
+      "source_ids": [
+        "S4306418075"
+      ]
+    }
+  },
+  "preprint_servers": [
+    "biorxiv",
+    "biorxiv cold spring harbor laboratory",
+    "medrxiv",
+    "medrxiv cold spring harbor laboratory",
+    "arxiv",
+    "arxiv cornell university"
+  ],
+  "denied_publishers": [
+    "mdpi",
+    "mdpi ag",
+    "multidisciplinary digital publishing institute",
+    "frontiers",
+    "frontiers media",
+    "frontiers media sa",
+    "hindawi",
+    "hindawi limited",
+    "hindawi publishing corporation",
+    "ivyspring",
+    "ivyspring international publisher",
+    "dove press",
+    "dove medical press",
+    "medknow",
+    "wolters kluwer medknow publications",
+    "impact journals",
+    "impact journals llc"
+  ],
+  "denied_journals": [
+    "scientific reports",
+    "iscience",
+    "heliyon",
+    "oncotarget"
+  ],
+  "nature_portfolio_below_threshold": [
+    "scientific reports",
+    "translational psychiatry",
+    "npj genomic medicine",
+    "communications biology",
+    "european journal of human genetics",
+    "journal of human genetics",
+    "neuropsychopharmacology",
+    "cell death and disease",
+    "cell death discovery",
+    "genes and immunity",
+    "pediatric research",
+    "npj schizophrenia",
+    "npj mental health research"
+  ]
+}
