@@ -27,10 +27,9 @@ key as a Bearer token.
 
 ## Get a key from TypeSafe
 
-Create an account at [typesafe.ai](https://typesafe.ai) and issue an API key from your account
-page. TypeSafe's quickstart says to get the key from the dashboard at
-https://console.typesafe.ai/keys; the exact labels are in TypeSafe's documentation,
-https://docs.typesafe.ai. The key is used for the SystemOne endpoint above.
+Create an account at [typesafe.ai](https://typesafe.ai). TypeSafe's quickstart says to get the key
+from the dashboard at https://console.typesafe.ai/keys; the exact labels are in TypeSafe's
+documentation, https://docs.typesafe.ai. The key is used for the SystemOne endpoint above.
 
 Copy the key once, straight into the command in the next section. Do not paste it into a chat
 with an agent, an e-mail or a file.

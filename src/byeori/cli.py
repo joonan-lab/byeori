@@ -25,6 +25,7 @@ from .openalex import OpenAlexClient, OpenAlexError
 from .openalex_match import match_openalex
 from .benchmark import run_question_benchmark
 from .extract import extraction_status, run_extraction
+from . import paper_upload
 from .papers import resolve_ids, resolve_ids_ncbi, upload_papers
 from .pipeline import (draft_step, failed_stems, ingest_step, require_allowlisted_journal,
                        run_pipeline, run_stem_pipeline, source_note_step, synthesize_step)
@@ -67,7 +68,18 @@ def _env_for_scripts(args: argparse.Namespace) -> dict[str, str]:
 
 def command_deploy(settings: Settings, args: argparse.Namespace) -> int:
     env = _env_for_scripts(args)
-    code = installer.run_script("deploy.sh", env, *(args.parameter or []))
+    run_env = env
+    if not env.get("AWS_KIRO_WIKI_BUCKET"):
+        # A first install has no bucket yet: the stack's own data bucket is one of its outputs, so
+        # `deploy.sh` (which packages templates into a bucket via `aws cloudformation package`)
+        # cannot use it before the stack exists. A small bootstrap bucket holds the package this once.
+        session = boto3.Session(profile_name=env.get("AWS_PROFILE"), region_name=env.get("AWS_REGION"))
+        account = session.client("sts").get_caller_identity()["Account"]
+        region = session.region_name or env.get("AWS_REGION", "us-east-1")
+        bucket = installer.ensure_deploy_bucket(session, account, region)
+        run_env = {**env, "AWS_KIRO_WIKI_BUCKET": bucket}
+        print(f"packaging the deployment templates into {bucket} (created for this first install)")
+    code = installer.run_script("deploy.sh", run_env, *(args.parameter or []))
     if code != 0:
         return code
     session = boto3.Session(profile_name=env.get("AWS_PROFILE"), region_name=env.get("AWS_REGION"))
@@ -223,6 +235,15 @@ def command_attach_pdf(settings: Settings, args: argparse.Namespace) -> int:
         result = catalog.attach_pdf(args.identifier, Path(args.pdf).expanduser().resolve())
     print_json(result)
     return 0
+
+
+def command_upload_pdf(settings: Settings, args: argparse.Namespace) -> int:
+    if not settings.aws_bucket:
+        raise RuntimeError("AWS_KIRO_WIKI_BUCKET is not configured")
+    result = paper_upload.upload_one(settings, Path(args.pdf).expanduser().resolve(),
+                                     stem=args.stem, source=args.source or "upload-pdf")
+    print_json(result)
+    return 0 if result["state"] in ("uploaded", "already_present") else 1
 
 
 def command_validate(settings: Settings, _: argparse.Namespace) -> int:
@@ -776,6 +797,14 @@ def build_parser() -> argparse.ArgumentParser:
     attach_parser.add_argument("identifier")
     attach_parser.add_argument("pdf")
     attach_parser.set_defaults(handler=command_attach_pdf)
+
+    upload_pdf_parser = subparsers.add_parser(
+        "upload-pdf",
+        help="store one PDF as papers/{stem}/original.pdf with meta.json and a catalog item, ready for aws-extract")
+    upload_pdf_parser.add_argument("pdf")
+    upload_pdf_parser.add_argument("--stem", help="lowercase author-year-words stem; defaults to the file's own name")
+    upload_pdf_parser.add_argument("--source", help="where the PDF came from (default: upload-pdf)")
+    upload_pdf_parser.set_defaults(handler=command_upload_pdf)
 
     validate_parser = subparsers.add_parser("validate", help="validate source and paper page sections")
     validate_parser.set_defaults(handler=command_validate)

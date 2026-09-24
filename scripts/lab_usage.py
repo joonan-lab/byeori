@@ -1,6 +1,6 @@
 """Print the lab's monthly Byeori spend per member.
 
-    LAB_FUNCTION_URL=https://<id>.lambda-url.ap-northeast-2.on.aws/ AWS_PROFILE=<admin> \
+    LAB_FUNCTION_URL=https://<id>.lambda-url.<region>.on.aws/ AWS_PROFILE=<admin> \
         uv run python scripts/lab_usage.py [--period 2026-09] [--member <member_id>] [--json]
 
 The gateway reads the budget ledger the answer and research workers already write; this script only

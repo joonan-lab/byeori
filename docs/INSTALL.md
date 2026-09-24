@@ -84,6 +84,12 @@ cluster (Fargate), the image repository (ECR), the workflows (Step Functions), t
 command writes the bucket, table and ingest function names back into `.byeori.env`; run
 `source .byeori.env` again.
 
+On a first install, before the stack exists, there is no bucket yet to package the CloudFormation
+templates into — the data bucket above is itself one of the stack's outputs. `byeori deploy`
+creates a small deployment bucket of its own for this, `byeori-deploy-<account>-<region>`, and
+prints its name. It stays afterward (it holds a few kilobytes of packaged templates) and is
+reused by every later deploy once the env file has a data bucket configured.
+
 What `CreateVpc` means: the Fargate tasks need a network with internet access, to pull their
 container images and to reach S3 and DynamoDB. With `true` (your answer in step 2)
 the stack creates a small network of its own (a VPC with two public subnets), which costs nothing
@@ -140,20 +146,19 @@ yourself, because nothing else will work without it.
 One paper you have as a PDF. Every step runs in AWS; your computer only sends the PDF and reads
 the results. It costs roughly what `docs/COST.md` gives for one paper.
 
-Find the paper in OpenAlex and save it as a candidate. `candidate-add` prints the record,
-including its `stem`, the paper's folder name in the bucket:
+Upload the PDF. The file on your computer is only read, never moved or changed. `--stem` is the
+paper's folder name in the bucket: lowercase letters, digits and hyphens, usually
+`<first author>-<year>-<a few title words>`, for example `smith-2024-cortical-organoids`.
 
 ```bash
 source .byeori.env
-uv run byeori search "<title of the paper>" --limit 5
-uv run byeori candidate-add <OpenAlex work id, for example W1234567890>
+uv run byeori upload-pdf <path to the PDF> --stem <author-year-words>
 ```
 
-Upload the PDF (the file on your computer is not moved or changed):
-
-```bash
-uv run byeori attach-pdf <OpenAlex work id> <path to the PDF>
-```
+(If you already know the paper's OpenAlex work id and would rather start from there: `uv run
+byeori search "<title of the paper>" --limit 5`, then `uv run byeori candidate-add <OpenAlex work
+id, for example W1234567890>`, which prints the record including its `stem`, then `uv run byeori
+attach-pdf <OpenAlex work id> <path to the PDF>` in place of `upload-pdf` above.)
 
 Extract its text with GROBID on Fargate, and check on the task (a few minutes):
 
@@ -174,7 +179,7 @@ every page's structure, rebuild the search index, and search:
 ```bash
 uv run byeori validate
 uv run byeori build-index
-uv run byeori wiki-search "<a question the paper answers>"
+uv run byeori wiki-search "<a phrase from the paper>"
 uv run byeori wiki-read note <stem>
 ```
 

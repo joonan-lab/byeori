@@ -111,3 +111,145 @@ def test_parser_has_the_installer_commands():
     assert {"init", "deploy", "build-workers", "deploy-lab", "grant-client", "doctor"} <= set(choices)
     init = choices["init"]
     assert any("--non-interactive" in a.option_strings for a in init._actions)
+
+
+def test_ensure_deploy_bucket_creates_with_a_location_constraint():
+    calls = []
+
+    class S3:
+        def create_bucket(self, **kwargs):
+            calls.append(kwargs)
+
+    class Session:
+        def client(self, name):
+            assert name == "s3"
+            return S3()
+
+    name = installer.ensure_deploy_bucket(Session(), "111122223333", "eu-west-1")
+    assert name == "byeori-deploy-111122223333-eu-west-1"
+    assert calls == [{"Bucket": name, "CreateBucketConfiguration": {"LocationConstraint": "eu-west-1"}}]
+
+
+def test_ensure_deploy_bucket_omits_the_location_constraint_for_us_east_1():
+    calls = []
+
+    class S3:
+        def create_bucket(self, **kwargs):
+            calls.append(kwargs)
+
+    class Session:
+        def client(self, name):
+            return S3()
+
+    name = installer.ensure_deploy_bucket(Session(), "111122223333", "us-east-1")
+    assert name == "byeori-deploy-111122223333-us-east-1"
+    assert calls == [{"Bucket": name}]
+
+
+def test_ensure_deploy_bucket_tolerates_bucket_already_owned_by_you():
+    class S3:
+        def create_bucket(self, **kwargs):
+            raise ClientError({"Error": {"Code": "BucketAlreadyOwnedByYou"}}, "CreateBucket")
+
+    class Session:
+        def client(self, name):
+            return S3()
+
+    name = installer.ensure_deploy_bucket(Session(), "111122223333", "us-east-1")
+    assert name == "byeori-deploy-111122223333-us-east-1"
+
+
+def test_ensure_deploy_bucket_propagates_other_client_errors():
+    class S3:
+        def create_bucket(self, **kwargs):
+            raise ClientError({"Error": {"Code": "AccessDenied"}}, "CreateBucket")
+
+    class Session:
+        def client(self, name):
+            return S3()
+
+    with pytest.raises(ClientError):
+        installer.ensure_deploy_bucket(Session(), "111122223333", "us-east-1")
+
+
+def test_command_deploy_passes_the_bootstrap_bucket_when_the_env_file_lacks_one(tmp_path, monkeypatch):
+    from byeori.config import Settings
+
+    env_file = tmp_path / ".env"
+    installer.write_env(env_file, {"AWS_PROFILE": "byeori", "AWS_REGION": "us-east-1", "KIRO_WIKI_STACK": "byeori"})
+
+    captured: dict = {}
+
+    def fake_run_script(name, env, *args):
+        captured["script"] = name
+        captured["env"] = env
+        return 0
+
+    monkeypatch.setattr(installer, "run_script", fake_run_script)
+
+    class Cloudformation:
+        def describe_stacks(self, StackName):
+            return {"Stacks": [{"Outputs": [{"OutputKey": "BucketName", "OutputValue": "byeori-data-111122223333"}]}]}
+
+    class Sts:
+        def get_caller_identity(self):
+            return {"Account": "111122223333"}
+
+    class S3:
+        def create_bucket(self, **kwargs):
+            captured["create_bucket_kwargs"] = kwargs
+
+    class FakeSession:
+        def __init__(self, *a, **kw):
+            pass
+        region_name = "us-east-1"
+
+        def client(self, name):
+            return {"cloudformation": Cloudformation(), "sts": Sts(), "s3": S3()}[name]
+
+    monkeypatch.setattr(cli, "boto3", MagicMock(Session=FakeSession))
+
+    args = build_parser().parse_args(["deploy", "--env-file", str(env_file)])
+    code = cli.command_deploy(Settings.from_env(), args)
+
+    assert code == 0
+    assert captured["script"] == "deploy.sh"
+    assert captured["env"]["AWS_KIRO_WIKI_BUCKET"] == "byeori-deploy-111122223333-us-east-1"
+    assert installer.read_env(env_file)["AWS_KIRO_WIKI_BUCKET"] == "byeori-data-111122223333"
+
+
+def test_command_deploy_does_not_bootstrap_a_bucket_when_the_env_file_already_has_one(tmp_path, monkeypatch):
+    from byeori.config import Settings
+
+    env_file = tmp_path / ".env"
+    installer.write_env(env_file, {"AWS_PROFILE": "byeori", "AWS_REGION": "us-east-1", "KIRO_WIKI_STACK": "byeori",
+                                   "AWS_KIRO_WIKI_BUCKET": "byeori-data-111122223333"})
+
+    captured: dict = {}
+
+    def fake_run_script(name, env, *args):
+        captured["env"] = env
+        return 0
+
+    monkeypatch.setattr(installer, "run_script", fake_run_script)
+
+    class Cloudformation:
+        def describe_stacks(self, StackName):
+            return {"Stacks": [{"Outputs": [{"OutputKey": "BucketName", "OutputValue": "byeori-data-111122223333"}]}]}
+
+    class FakeSession:
+        def __init__(self, *a, **kw):
+            pass
+        region_name = "us-east-1"
+
+        def client(self, name):
+            assert name == "cloudformation"
+            return Cloudformation()
+
+    monkeypatch.setattr(cli, "boto3", MagicMock(Session=FakeSession))
+
+    args = build_parser().parse_args(["deploy", "--env-file", str(env_file)])
+    code = cli.command_deploy(Settings.from_env(), args)
+
+    assert code == 0
+    assert captured["env"]["AWS_KIRO_WIKI_BUCKET"] == "byeori-data-111122223333"

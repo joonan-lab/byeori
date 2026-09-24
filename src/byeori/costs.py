@@ -20,7 +20,7 @@ PRICES_USD_PER_MILLION: dict[str, dict[str, float]] = {
     "claude-sonnet-5": {"input": 2.0, "output": 10.0, "cache_write": 2.50, "cache_read": 0.20},
     # Before "claude-opus-5": the lookup takes the first fragment the id contains, and that one is a
     # substring of this id, so the other order priced Opus 5.5 at Opus 5's rates. These are the
-    # Bedrock rates for the global profile in ap-northeast-2, read from the AWS Price List API
+    # Bedrock rates for the global profile in the lab's region, read from the AWS Price List API
     # (AmazonBedrockFoundationModels, APN2_*_global_standard) on 2026-09-23.
     "claude-opus-5-5": {"input": 4.0, "output": 20.0, "cache_write": 5.00, "cache_read": 0.20},
     "claude-opus-5": {"input": 5.0, "output": 25.0, "cache_write": 6.25, "cache_read": 0.50},

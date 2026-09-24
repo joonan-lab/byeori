@@ -140,3 +140,19 @@ def model_ids_of(cloudformation: Any, stack: str) -> list[str]:
 def run_script(name: str, env: dict[str, str], *args: str) -> int:
     merged = {**os.environ, **env}
     return subprocess.run(["bash", str(REPO_ROOT / "scripts" / name), *args], cwd=REPO_ROOT, env=merged).returncode
+
+
+def ensure_deploy_bucket(session: Any, account: str, region: str) -> str:
+    """The small bucket `deploy.sh` packages CloudFormation templates into. A first install has no
+    other bucket yet: the stack's own data bucket is one of the stack's *outputs*, so it cannot
+    hold the templates that create it. This bucket is created once, stays (a few kilobytes), and is
+    reused by every later deploy that already has a data bucket configured (`command_deploy` only
+    calls this when the env file has none)."""
+    name = f"byeori-deploy-{account}-{region}"
+    kwargs: dict[str, Any] = {} if region == "us-east-1" else {"CreateBucketConfiguration": {"LocationConstraint": region}}
+    try:
+        session.client("s3").create_bucket(Bucket=name, **kwargs)
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") != "BucketAlreadyOwnedByYou":
+            raise
+    return name

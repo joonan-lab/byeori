@@ -29,7 +29,6 @@ from .lab_policy import POLICY_REVISION
 from .lab_store import Delete, Put, TablePort, Update, keys, new_item, now_iso
 
 DEFAULT_STACK = "byeori-lab"
-DEFAULT_REGION = "ap-northeast-2"
 
 # Partition that lists every registered member: one row per member, sk = member_id.
 MEMBERS_INDEX = "MEMBERS"
