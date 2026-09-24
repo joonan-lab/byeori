@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.1.0-beta.1 (unreleased)
+## v0.1.0-beta.1 (2026-09-24)
 
 Copyright 2026 Joon An and the An Lab, Apache-2.0. First public beta. Exported from the An Lab
 workspace (see `RELEASE-SOURCE`).
