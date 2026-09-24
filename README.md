@@ -32,6 +32,109 @@ pdf_sha256: ""
 
 ```
 
+## What the wiki holds, layer by layer
+
+Everything lives in one S3 bucket. The layers below go from the ground truth up to the pages a
+reader browses. Each one says what a page is, what it is written from, who writes it, where it
+lives, and whether search reaches it.
+
+### 1. Originals and extraction: `papers/{stem}/`
+
+These are not wiki pages. They are the ground truth every page answers to. A paper's folder holds
+the original PDF, the full text that GROBID extracted from it (`clean.md`), the figures and tables
+cut from it (`assets/`), and any supplementary files (`supplementary/`). Code writes them: the upload, the
+extraction task on Fargate, and the figure cutter. They are never overwritten. The search index
+does not include them. The layers above link down to them through the note's `pdf_path` and
+`pdf_sha256`, and a question can reread the stored text when a note is not enough.
+
+### 2. Evidence notes: `wiki/sources/{stem}.md`
+
+One paper has one note. A Claude model in Bedrock writes it from the paper's full text; on request,
+a Claude Code session writes it instead. The frontmatter records provenance: the paper's
+identifiers, the hash of the stored PDF, and the model and settings that wrote it. The body has
+fixed sections: a one-line summary, a document-information table that code fills in, key
+contributions, methodology, key results, limitations and future work, related work, and a
+glossary. (`templates/source.md` is the shorter shape of a draft made from OpenAlex discovery:
+citation, methods, results, limitations, evidence boundary, related pages.) The note reports only
+what the paper states. Its results carry the paper's numbers exactly as written. Its limitations
+list the authors' own first, marked as theirs, and then at most three the model adds, marked as
+reviewer notes. The search index
+includes every note whose status is ready.
+
+A note's scientific text is not rewritten by synthesis. Which pages cite a note is computed from the
+index's links table. Three small things can still change a note. When a synthesis or question page
+is published, the publisher adds a short "Linked pages" block to each note that page cites. The
+administrator's research loop may edit one passage of a note it has just read. A note gets one
+standing line that points to its hub of member questions (layer 7).
+
+### 3. Concept pages: `wiki/concepts/{slug}.md`
+
+A concept page covers one named thing: a gene, a method, a cohort or a phenomenon. Its candidates
+are counted, not chosen. Code reads the glossary of every ready note and counts, per term, how many
+notes carry it. A page is made when at least 5 notes in the chosen scope carry the term. The model
+writes the definition, what the notes show and where they disagree, from those member notes only.
+Every finding ends with a link to a note. Code writes the related concepts and the list of member
+notes. The search index includes concept pages.
+
+### 4. Overviews, level 1: `wiki/overviews/{category}/{subtopic}.md`
+
+A subtopic page covers one part of one field (a category). The planner splits a category's notes
+into 4 to 12 subtopics of at least 5 notes each, with every note in exactly one. The model then
+writes each page from the notes assigned to it: scope, findings, a comparison table, and open
+questions. Every finding points at a note. Code adds the frequent concepts and the member notes.
+The search index includes these pages. They link down to notes and concepts, and up to their
+category page.
+
+### 5. Overviews, level 2: `wiki/overviews/{category}/index.md`
+
+A category page is the landscape of one field, written for a person to read. The model writes it
+from the category's subtopic pages, not from the notes, so it comes after them. It says what the
+field has established and where it divides. Every claim links a subtopic page or a note. Code adds
+the list of subtopics, the key concepts and the coverage. The search index includes it.
+
+### 6. Question pages: `wiki/questions/{slug}.md`
+
+A question page is the answer to one of the administrator's research questions. A research loop in
+AWS writes it: the model searches the wiki, reads notes and, when needed, the stored full text.
+The page has five fixed sections: Question, Sharper follow-up, What the knowledge base holds,
+Tentative answer from the knowledge base, and Related Pages. On the way, the loop may create a
+concept or overview page or revise one it has read. Question pages are in the index, but a search
+leaves them out unless it asks for them.
+
+### 7. Member answers: `wiki/lab-questions/`
+
+Each answer a lab member receives is kept as a page at `wiki/lab-questions/{period}/{job}.md`: the
+question, the answer, its citations as links and its limitations. Each cited page has a hub at
+`wiki/lab-questions/by-page/{folder}/{stem}.md` that lists every question that cited it. These
+pages stay out of the search index on purpose. At a lab's volume they would soon outnumber the
+notes and take the result slots the notes need. They are reached by link instead. An answer links
+up to what it cited, and a cited page carries one standing line to its hub, added once by
+`byeori aws-link-lab-questions`.
+
+### 8. Catalogs: `wiki/index.md` and `wiki/indexes/`
+
+Catalogs are browse pages, built by code without a model. `wiki/indexes/categories/{field}.md`
+lists every note in one field, one line each, with year, journal, DOI and the note's one-line
+summary. It marks as an orphan any note no concept or overview cites yet.
+`wiki/indexes/categories.md` is the table of fields, and `wiki/index.md` links to it. The catalogs
+stay out of the search index, so a list never takes a result slot.
+
+### 9. The search index: `index/`
+
+The index is a BM25 search over the pages of layers 2 to 6, with a links table between them. It is
+rebuilt in AWS on a nightly schedule and on demand with `byeori build-index`. It leaves out drafts,
+failed pages, notes that are not ready, the catalogs and the member answers. A new page becomes
+searchable at the next rebuild.
+
+### How the layers are used
+
+A question is answered from the synthesis layers first: concepts, overviews and earlier questions.
+It drops to the notes, and from a note to the original, when the answer needs a number or a
+check. A new synthesis is reachable from the notes it cites and from the catalog of its field. A
+paper has one note and no second per-paper page. A shorter reader page per paper was tried: it
+repeated the note and held no numbers of its own. It also halved what a search could reach,
+because a paper's two pages competed for the same result slots.
+
 ## What it needs and what it costs
 
 - An AWS account and a user in it with administrator access.
