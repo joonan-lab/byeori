@@ -37,3 +37,22 @@ def test_validate_checks_synthesis_kind(tmp_path):
 
 def test_empty_remote_inventory_does_not_pass(tmp_path):
     assert validate(settings(tmp_path),store=Store({}))==["No published wiki Markdown found in the configured S3 wiki/ prefix"]
+
+
+def test_validate_skips_generated_catalog_and_lab_question_pages(tmp_path):
+    errors = validate(settings(tmp_path), store=Store({
+        "wiki/sources/a.md": "\n".join(SOURCE_SECTIONS),
+        "wiki/indexes/categories/x.md": "# Category catalog\nnot a note",
+        "wiki/lab-questions/2026-09/j.md": "# A student question\nno required sections here",
+    }))
+    assert errors == []
+
+
+def test_validate_still_reports_an_invalid_note_alongside_generated_pages(tmp_path):
+    errors = validate(settings(tmp_path), store=Store({
+        "wiki/sources/a.md": "# Paper",
+        "wiki/indexes/categories/x.md": "# Category catalog\nnot a note",
+        "wiki/lab-questions/2026-09/j.md": "# A student question\nno required sections here",
+    }))
+    assert "s3://bucket/wiki/sources/a.md: missing ## Methods" in errors
+    assert not any("wiki/indexes/" in e or "wiki/lab-questions/" in e for e in errors)

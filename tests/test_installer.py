@@ -218,6 +218,105 @@ def test_command_deploy_passes_the_bootstrap_bucket_when_the_env_file_lacks_one(
     assert installer.read_env(env_file)["AWS_KIRO_WIKI_BUCKET"] == "byeori-data-111122223333"
 
 
+def test_command_deploy_lab_defaults_the_stack_name_from_the_main_stack_and_records_it(tmp_path, monkeypatch):
+    from byeori.config import Settings
+
+    env_file = tmp_path / ".env"
+    installer.write_env(env_file, {"AWS_PROFILE": "byeori", "AWS_REGION": "us-east-1", "KIRO_WIKI_STACK": "byeori-release-check"})
+
+    captured: dict = {}
+
+    def fake_run_script(name, env, *args):
+        captured["script"] = name
+        captured["env"] = env
+        captured["args"] = args
+        return 0
+
+    monkeypatch.setattr(installer, "run_script", fake_run_script)
+
+    args = build_parser().parse_args(["deploy-lab", "--env-file", str(env_file)])
+    code = cli.command_deploy_lab(Settings.from_env(), args)
+
+    assert code == 0
+    assert captured["script"] == "deploy_lab.sh"
+    assert captured["env"]["LAB_STACK"] == "byeori-release-check-lab"
+    assert installer.read_env(env_file)["LAB_STACK"] == "byeori-release-check-lab"
+
+
+def test_command_deploy_lab_keeps_an_explicit_stack_name(tmp_path, monkeypatch):
+    from byeori.config import Settings
+
+    env_file = tmp_path / ".env"
+    installer.write_env(env_file, {"AWS_PROFILE": "byeori", "AWS_REGION": "us-east-1", "KIRO_WIKI_STACK": "byeori",
+                                   "LAB_STACK": "byeori-lab-custom"})
+
+    captured: dict = {}
+
+    def fake_run_script(name, env, *args):
+        captured["env"] = env
+        return 0
+
+    monkeypatch.setattr(installer, "run_script", fake_run_script)
+
+    args = build_parser().parse_args(["deploy-lab", "--env-file", str(env_file)])
+    code = cli.command_deploy_lab(Settings.from_env(), args)
+
+    assert code == 0
+    assert captured["env"]["LAB_STACK"] == "byeori-lab-custom"
+
+
+def test_command_deploy_jev_eval_defaults_the_stack_name_and_requires_the_kms_key(tmp_path, monkeypatch):
+    from byeori.config import Settings
+
+    env_file = tmp_path / ".env"
+    installer.write_env(env_file, {"AWS_PROFILE": "byeori", "AWS_REGION": "us-east-1", "KIRO_WIKI_STACK": "byeori-release-check"})
+
+    args = build_parser().parse_args(["deploy-jev-eval", "--env-file", str(env_file)])
+    with pytest.raises(RuntimeError, match="LAB_JEV_KMS_KEY_ARN"):
+        cli.command_deploy_jev_eval(Settings.from_env(), args)
+
+    installer.write_env(env_file, {"LAB_JEV_KMS_KEY_ARN": "arn:aws:kms:us-east-1:111122223333:key/abc"})
+
+    captured: dict = {}
+
+    def fake_run_script(name, env, *args):
+        captured["script"] = name
+        captured["env"] = env
+        return 0
+
+    monkeypatch.setattr(installer, "run_script", fake_run_script)
+
+    code = cli.command_deploy_jev_eval(Settings.from_env(), args)
+
+    assert code == 0
+    assert captured["script"] == "deploy_jev_eval.sh"
+    assert captured["env"]["JEV_EVAL_STACK"] == "byeori-release-check-jev"
+    assert installer.read_env(env_file)["JEV_EVAL_STACK"] == "byeori-release-check-jev"
+
+
+def test_command_deploy_jev_eval_keeps_an_explicit_stack_name(tmp_path, monkeypatch):
+    from byeori.config import Settings
+
+    env_file = tmp_path / ".env"
+    installer.write_env(env_file, {"AWS_PROFILE": "byeori", "AWS_REGION": "us-east-1", "KIRO_WIKI_STACK": "byeori",
+                                   "JEV_EVAL_STACK": "byeori-jev-custom",
+                                   "LAB_JEV_KMS_KEY_ARN": "arn:aws:kms:us-east-1:111122223333:key/abc"})
+
+    captured: dict = {}
+
+    def fake_run_script(name, env, *args):
+        captured["env"] = env
+        return 0
+
+    monkeypatch.setattr(installer, "run_script", fake_run_script)
+
+    args = build_parser().parse_args(["deploy-jev-eval", "--env-file", str(env_file)])
+    code = cli.command_deploy_jev_eval(Settings.from_env(), args)
+
+    assert code == 0
+    assert captured["env"]["JEV_EVAL_STACK"] == "byeori-jev-custom"
+
+
 def test_command_deploy_does_not_bootstrap_a_bucket_when_the_env_file_already_has_one(tmp_path, monkeypatch):
     from byeori.config import Settings
 

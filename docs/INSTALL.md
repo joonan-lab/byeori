@@ -56,6 +56,19 @@ terminal:
 source .byeori.env
 ```
 
+For a scripted install (no terminal prompts), pass `--non-interactive` and answer each question
+with `--set KEY=VALUE`. The keys are `AWS_PROFILE`, `AWS_REGION`, `KIRO_WIKI_STACK`,
+`KIRO_WIKI_OPENALEX_PARAMETER`, `KIRO_WIKI_CONTACT_EMAIL` and `KIRO_WIKI_CREATE_VPC`; when
+`KIRO_WIKI_CREATE_VPC` is not `true`, also set `KIRO_WIKI_VPC_ID` and `KIRO_WIKI_SUBNET_IDS`. Any
+key you leave out keeps its default (or, on a rerun, the value already in `.byeori.env`):
+
+```bash
+uv run byeori init --non-interactive \
+  --set AWS_PROFILE=byeori --set AWS_REGION=us-east-1 --set KIRO_WIKI_STACK=byeori \
+  --set KIRO_WIKI_OPENALEX_PARAMETER=/byeori/openalex-api-key \
+  --set KIRO_WIKI_CONTACT_EMAIL=lab@example.org --set KIRO_WIKI_CREATE_VPC=true
+```
+
 ## 3. `byeori deploy`
 
 First put your OpenAlex key into Parameter Store, under the name you gave in step 2. Run this
@@ -120,6 +133,15 @@ Builds the asset worker image with Docker (the program that cuts figures and tab
 PDF), pushes it to the stack's ECR repository, and publishes the worker script to the bucket.
 The first build downloads several gigabytes and takes several minutes. Docker must be running.
 
+No Docker on this machine? You can skip this step for now and come back to it later, from any
+machine that has Docker, by running `uv run byeori build-workers` again against the same
+`.byeori.env`. Without the image, step 6 still writes the evidence note: extraction and the note
+itself use Fargate and Bedrock, not the asset worker. Only the figure- and table-cutting task is
+affected, and it fails visibly rather than silently — `aws-extract-status` shows it as STOPPED
+with `CannotPullContainerError` (the ECR repository has no image yet) while GROBID extraction and
+the note both succeed. The note is complete text with figures and tables simply missing until you
+run `build-workers`.
+
 ## 5. `byeori doctor`
 
 ```bash
@@ -167,6 +189,26 @@ uv run byeori aws-extract --stems <stem> --tasks 1
 uv run byeori aws-extract-status
 ```
 
+Watch for two things here, both harmless on their own:
+
+- Without step 4's asset worker image, the extraction's asset task fails with
+  `CannotPullContainerError` in the status output. That is expected if you skipped `build-workers`;
+  extraction itself still finishes, and the note below is unaffected.
+- `aws-extract-status` may settle at `fulltext_ready_unclassified` instead of `fulltext_ready`.
+  That means GROBID read the PDF's text, but the automatic identity check — matching the title and
+  DOI it found against OpenAlex — could not settle which paper this is, so the pipeline parked it
+  rather than guess. This is common for commentaries, letters and papers with an unusual first
+  page; a straightforward research article with a clear title and a resolvable DOI almost always
+  reaches `fulltext_ready` on its own. If it stays at `fulltext_ready_unclassified`, the next
+  `aws-source-note` step fails with `has no extracted text yet (ingest_status
+  fulltext_ready_unclassified)` — a misleading message, since the text *is* there; only the
+  identity is unsettled. `uv run byeori resolve-ids --help` looks like the tool for this, but
+  reading it shows it requires a required path argument pointing at a separate local paper-notes
+  checkout to compare against, for a bulk migration this repository does not ship and a new
+  installer will not have — it is not a fix for a single unresolved upload. For your first paper,
+  the practical fix is simply to pick a different PDF — an ordinary journal article rather than a
+  commentary or a paper with a non-standard layout — and upload that instead.
+
 Have Bedrock write the evidence note from the extracted full text:
 
 ```bash
@@ -182,6 +224,19 @@ uv run byeori build-index
 uv run byeori wiki-search "<a phrase from the paper>"
 uv run byeori wiki-read note <stem>
 ```
+
+`validate` only checks notes and syntheses — pages under `wiki/sources/`, `wiki/overviews/`,
+`wiki/concepts/` and `wiki/questions/` — never the catalog pages the index builder generates under
+`wiki/indexes/` or the lab's own question pages under `wiki/lab-questions/`. A clean first paper
+prints nothing and exits 0. A real failure looks like one line per missing section, naming the S3
+key and the heading, for example:
+
+```
+s3://<your bucket>/wiki/sources/<stem>.md: missing ## Evidence boundary
+```
+
+and the command exits 1. That means the note itself is missing a required section; open it
+(`uv run byeori wiki-read note <stem>`) and see what is short.
 
 For many papers at once, `uv run byeori aws-pipeline-stems` writes the note for every extracted
 paper that has none, in parallel, and rebuilds the index at the end.
@@ -201,8 +256,12 @@ echo "export LAB_JEV_KMS_KEY_ARN=<Arn from the create-key output>" >> .byeori.en
 source .byeori.env
 ```
 
-The key costs $1 a month. Then deploy the stack and register each member (the member's IAM user
-must exist first; `docs/LAB-SERVICE.md` explains how):
+The key costs $1 a month. `byeori deploy-lab` names the stack `<your KIRO_WIKI_STACK>-lab` by
+default (recorded as `LAB_STACK` in `.byeori.env` the first time you run it) — if you administer
+more than one Byeori installation in this account, each needs its own stack name, so do not reuse
+one; setting `LAB_STACK` yourself in `.byeori.env` before the first run picks a different one.
+Then deploy the stack and register each member (the member's IAM user must exist first;
+`docs/LAB-SERVICE.md` explains how):
 
 ```bash
 uv run byeori deploy-lab
@@ -268,22 +327,59 @@ variables above under `[mcp_servers.byeori.env]`.
 What things cost is in `docs/COST.md`. To see what you have actually spent, open Billing → Cost
 Explorer in the console and group by service.
 
-To remove Byeori, delete the student stack first (if you made one), then the main stack:
+To remove Byeori, delete the student stack first (if you made one; its name is `LAB_STACK` in
+`.byeori.env`, `<your stack>-lab` unless you chose otherwise), then the main stack:
 
 ```bash
-aws cloudformation delete-stack --stack-name byeori-lab
+aws cloudformation delete-stack --stack-name <your stack name>-lab
 aws cloudformation delete-stack --stack-name <your stack name>
 ```
 
-On purpose, deleting the main stack does **not** delete the lab's data. These stay, and keep
-costing their storage, until you remove them by hand:
+**If you registered any lab members with `--attach-policy`,** the student stack's delete fails
+first, with `Cannot delete a policy attached to entities`: CloudFormation will not delete an IAM
+policy that is still attached to a user. Detach it from every member first. List who has it
+attached (the policy ARN is the student stack's `StudentAccessPolicyArn` or `AdminAccessPolicyArn`
+output, `aws cloudformation describe-stacks --stack-name <your stack name>-lab --query
+"Stacks[0].Outputs"`):
+
+```bash
+aws iam list-entities-for-policy --policy-arn <StudentAccessPolicyArn or AdminAccessPolicyArn> --entity-filter User
+aws iam detach-user-policy --user-name <IAM user name> --policy-arn <that policy arn>
+```
+
+Repeat the detach for each user the list shows, then delete the student stack again.
+
+On purpose, deleting a stack does **not** delete data the design wants kept past the stack's own
+life. These stay, and keep costing their storage, until you remove them by hand:
 
 - **The data bucket** (`AWS_KIRO_WIKI_BUCKET` in `.byeori.env`), with every PDF and page. To remove
   it, open S3 → the bucket → Empty in the console, confirm, then Delete. This cannot be undone;
   download anything you want to keep first.
 - **The audit bucket** (the stack output `AuditBucketName`), emptied and deleted the same way.
 - **The catalog table** (`AWS_KIRO_WIKI_TABLE`): `aws dynamodb delete-table --table-name <table>`.
+- **The student stack's control table** (`<lab stack name>-control`), retained with deletion
+  protection on, so the delete above leaves it behind. Turn protection off, then delete it:
+
+  ```bash
+  aws dynamodb update-table --table-name <lab stack name>-control --no-deletion-protection-enabled
+  aws dynamodb delete-table --table-name <lab stack name>-control
+  ```
+- **The main stack's asset-trigger log group** is retained too. Find its name (CloudFormation
+  gives Lambda functions a generated name, so it is not simply the stack name) and delete it:
+
+  ```bash
+  aws cloudformation describe-stack-resources --stack-name <your stack name> \
+    --logical-resource-id AssetTriggerFunction --query "StackResources[0].PhysicalResourceId" --output text
+  aws logs delete-log-group --log-group-name /aws/lambda/<that function name>
+  ```
 - **The ECR repository** with the worker image: in the console, ECR → Repositories → the
   repository → Delete, or `aws ecr delete-repository --repository-name <name> --force`.
+- **The deployment bucket** `byeori-deploy-<account>-<region>` that step 3 creates on a first
+  install is not part of any stack and is never deleted by CloudFormation. If you are removing
+  Byeori entirely from this account, empty and delete it the same way as the data bucket (S3 → the
+  bucket → Empty, then Delete).
 - **The parameters and the KMS key**: `aws ssm delete-parameter --name <name>` for each key you
-  stored, and `aws kms schedule-key-deletion --key-id <key arn> --pending-window-in-days 7`.
+  stored, and `aws kms schedule-key-deletion --key-id <key arn> --pending-window-in-days 7`. Never
+  delete a Parameter Store parameter or the KMS key if another Byeori installation in this account
+  still uses it — the OpenAlex parameter and the Jev key are each named once per installation, but
+  a shared KMS key (`LAB_JEV_KMS_KEY_ARN`) can outlive any one of them.

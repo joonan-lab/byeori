@@ -84,13 +84,20 @@ has one function that can read the Jev parameter and write receipts under
 
 ```bash
 source .byeori.env
-bash scripts/deploy_jev_eval.sh
+uv run byeori deploy-jev-eval
 ```
 
-Then make one call. The function is named after its stack, `byeori-jev-eval`:
+This defaults the stack's name to `JEV_EVAL_STACK`, `<your KIRO_WIKI_STACK>-jev`, and records it
+in `.byeori.env` the first time you run it — if you administer more than one Byeori installation
+in this account, each needs its own Jev evaluation stack name, so do not reuse one; set
+`JEV_EVAL_STACK` yourself beforehand to pick a different name. (The underlying script,
+`scripts/deploy_jev_eval.sh`, still works directly if you prefer; it reads the same
+`JEV_EVAL_STACK` variable and defaults it the same way.)
+
+Then make one call. The function is named after its stack:
 
 ```bash
-aws lambda invoke --function-name byeori-jev-eval --cli-binary-format raw-in-base64-out \
+aws lambda invoke --function-name "$JEV_EVAL_STACK" --cli-binary-format raw-in-base64-out \
   --payload '{"action": "smoke"}' jev-smoke.json
 cat jev-smoke.json
 ```
@@ -99,7 +106,7 @@ cat jev-smoke.json
 The call costs a small fraction of a cent. `{"action": "check_key_format"}` instead checks only
 that the stored value looks like a key (no spaces, quotes or a `Bearer` prefix pasted with it),
 without calling Jev. Neither result ever contains the key. Delete the stack when you are done:
-`aws cloudformation delete-stack --stack-name byeori-jev-eval`.
+`aws cloudformation delete-stack --stack-name "$JEV_EVAL_STACK"`.
 
 ## Rotate and revoke
 

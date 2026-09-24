@@ -94,7 +94,28 @@ def command_build_workers(settings: Settings, args: argparse.Namespace) -> int:
 
 
 def command_deploy_lab(settings: Settings, args: argparse.Namespace) -> int:
-    return installer.run_script("deploy_lab.sh", _env_for_scripts(args), "--execute")
+    """Deploy the optional student stack, defaulting LAB_STACK to <main stack>-lab so a second
+    installation in the same account does not collide with (and silently redeploy) another lab's
+    stack of the same default name."""
+    env = _env_for_scripts(args)
+    if not env.get("LAB_STACK"):
+        env = {**env, "LAB_STACK": f"{env['KIRO_WIKI_STACK']}-lab"}
+        installer.write_env(Path(args.env_file), {"LAB_STACK": env["LAB_STACK"]})
+    print(f"deploying the lab stack {env['LAB_STACK']}")
+    return installer.run_script("deploy_lab.sh", env, "--execute")
+
+
+def command_deploy_jev_eval(settings: Settings, args: argparse.Namespace) -> int:
+    """Deploy the optional Jev evaluation stack, defaulting JEV_EVAL_STACK to <main stack>-jev for
+    the same reason command_deploy_lab defaults LAB_STACK."""
+    env = _env_for_scripts(args)
+    if not env.get("JEV_EVAL_STACK"):
+        env = {**env, "JEV_EVAL_STACK": f"{env['KIRO_WIKI_STACK']}-jev"}
+        installer.write_env(Path(args.env_file), {"JEV_EVAL_STACK": env["JEV_EVAL_STACK"]})
+    if not env.get("LAB_JEV_KMS_KEY_ARN"):
+        raise RuntimeError("set LAB_JEV_KMS_KEY_ARN in the env file; see docs/JEV.md")
+    print(f"deploying the Jev evaluation stack {env['JEV_EVAL_STACK']}")
+    return installer.run_script("deploy_jev_eval.sh", env)
 
 
 def command_grant_client(settings: Settings, args: argparse.Namespace) -> int:
@@ -757,6 +778,7 @@ def build_parser() -> argparse.ArgumentParser:
         ("deploy", command_deploy, "deploy the main stack from infra/template.yaml and record its outputs in the env file"),
         ("build-workers", command_build_workers, "build and push the asset worker image; publish the worker scripts"),
         ("deploy-lab", command_deploy_lab, "deploy the optional student service stack"),
+        ("deploy-jev-eval", command_deploy_jev_eval, "deploy the optional Jev evaluation stack"),
         ("grant-client", command_grant_client, "print (or attach) the IAM policy an administrator's user needs"),
     ):
         sub = subparsers.add_parser(name, help=help_text)

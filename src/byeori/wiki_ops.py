@@ -18,6 +18,10 @@ from .validation import page_errors
 
 ACTIONS = {"wiki_read", "read_text", "wiki_categories", "wiki_validate", "wiki_metrics", "promote_draft",
            "pipeline_failures", "corpus_status", "synthesis_coverage", "notes_in_category"}
+# Mirrors the index builder's exclusion (ingest_lambda._build_wiki_index, ~line 1829): the
+# generated catalog pages under wiki/indexes/ and the lab's per-question pages are not notes or
+# syntheses and carry none of the required sections, so validation must not check them as such.
+GENERATED_PAGE_PREFIXES = ("wiki/indexes/", "wiki/lab-questions/")
 DOC_TYPES = {"note": "sources", "paper": "papers", "overview": "overviews",
              "concept": "concepts", "question": "questions"}
 MAX_CHARS = 8000
@@ -211,6 +215,8 @@ def _validate(event, s3, bucket):
     for obj in listing.get("Contents", []):
         key = obj["Key"]
         if not _published(key):
+            continue
+        if key == "wiki/index.md" or key.startswith(GENERATED_PAGE_PREFIXES):
             continue
         checked += 1
         try:
