@@ -1,4 +1,10 @@
 """In-memory AWS surfaces for candidate and publication regression tests."""
+import os
+
+# A fresh clone's tests must pass on a machine with no AWS configuration: two modules create
+# boto3 clients at import time and need a region name, and nothing here reaches AWS.
+os.environ.setdefault("AWS_DEFAULT_REGION", "us-east-1")
+
 import copy
 import io
 import json
