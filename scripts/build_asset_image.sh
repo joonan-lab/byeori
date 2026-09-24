@@ -41,7 +41,7 @@ if [ -z "$REPO_URI" ] || [ "$REPO_URI" = "None" ]; then
 fi
 
 echo "==> building linux/arm64 image (the build converts a PDF; it fails here if a model is missing)"
-docker build -f infra/asset-worker.Dockerfile -t "byeori-asset-worker:$TAG" .
+docker build --platform linux/arm64 -f infra/asset-worker.Dockerfile -t "byeori-asset-worker:$TAG" .
 
 echo "==> signing in to $REPO_URI"
 aws ecr get-login-password --region "$REGION" | docker login --username AWS --password-stdin "${REPO_URI%%/*}"

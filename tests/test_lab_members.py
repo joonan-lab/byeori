@@ -487,3 +487,10 @@ def test_cli_and_module_never_create_users_or_keys_and_build_clients_only_in_mai
     top_level_boto3 = [n for n in script_tree.body if not isinstance(n, (ast.FunctionDef, ast.Import, ast.ImportFrom))
                        and any(isinstance(m, ast.Name) and m.id == "boto3" for m in ast.walk(n))]
     assert top_level_boto3 == []
+
+
+def test_lab_stack_name_prefers_lab_stack_then_the_main_stack_then_the_default():
+    assert lab_members.lab_stack_name({"LAB_STACK": "x-lab", "KIRO_WIKI_STACK": "y"}) == "x-lab"
+    assert lab_members.lab_stack_name({"KIRO_WIKI_STACK": "mylab"}) == "mylab-lab"
+    assert lab_members.lab_stack_name({"LAB_STACK": "", "KIRO_WIKI_STACK": ""}) == "byeori-lab"
+    assert lab_members.lab_stack_name({}) == lab_members.DEFAULT_STACK == "byeori-lab"

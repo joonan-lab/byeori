@@ -69,21 +69,24 @@ uv run byeori init --non-interactive \
   --set KIRO_WIKI_CONTACT_EMAIL=lab@example.org --set KIRO_WIKI_CREATE_VPC=true
 ```
 
-## 3. `byeori deploy`
-
-First put your OpenAlex key into Parameter Store, under the name you gave in step 2. Run this
-yourself and paste the key where it says; do not paste it into a chat with an agent:
+Now put your OpenAlex key into Parameter Store, under the name you gave in question 4. `byeori
+deploy` needs it: the stack reads the key from there. Run this yourself; `read -rs` asks for the
+key without showing it on the screen or leaving it in your shell history, so paste it when the
+cursor waits and press Enter. Do not paste it into a chat with an agent:
 
 ```bash
 source .byeori.env
-aws ssm put-parameter --name /byeori/openalex-api-key --type SecureString --value <your key>
+read -rs KEY
+aws ssm put-parameter --name "$KIRO_WIKI_OPENALEX_PARAMETER" --type SecureString --value "$KEY"
+unset KEY
 ```
 
-(Sourcing the file first makes the AWS CLI use your profile and region.)
+`SecureString` means the value is stored encrypted. Sourcing the file first makes the AWS CLI use
+your profile and region, and gives `$KIRO_WIKI_OPENALEX_PARAMETER` the name you chose.
 
-`SecureString` means the value is stored encrypted. Use the name you chose if it differs.
+## 3. `byeori deploy`
 
-Then deploy:
+The OpenAlex key must already be in Parameter Store (end of step 2). Then deploy:
 
 ```bash
 source .byeori.env
@@ -93,15 +96,17 @@ uv run byeori deploy
 This hands `infra/template.yaml` to CloudFormation, which creates the stack: the data bucket (S3),
 the catalog table (DynamoDB), the ingest and synthesis functions (Lambda), the extraction
 cluster (Fargate), the image repository (ECR), the workflows (Step Functions), the audit trail
-(CloudTrail) and the timers (EventBridge). It takes ten to fifteen minutes. When it finishes, the
-command writes the bucket, table and ingest function names back into `.byeori.env`; run
-`source .byeori.env` again.
+(CloudTrail) and the timers (EventBridge). It takes a few minutes: about three for the stack, and
+longer the first time in an account where the network and the image repository are slow to set
+up. When it finishes, the command writes the bucket, table and ingest function names back into
+`.byeori.env`; run `source .byeori.env` again.
 
 On a first install, before the stack exists, there is no bucket yet to package the CloudFormation
 templates into — the data bucket above is itself one of the stack's outputs. `byeori deploy`
 creates a small deployment bucket of its own for this, `byeori-deploy-<account>-<region>`, and
-prints its name. It stays afterward (it holds a few kilobytes of packaged templates) and is
-reused by every later deploy once the env file has a data bucket configured.
+prints its name. Only that first deploy uses it: once `.byeori.env` names the data bucket, every
+later deploy packages the templates into the data bucket instead. The deployment bucket stays
+afterward, holding a few kilobytes, until you delete it (step 10).
 
 What `CreateVpc` means: the Fargate tasks need a network with internet access, to pull their
 container images and to reach S3 and DynamoDB. With `true` (your answer in step 2)
@@ -119,9 +124,21 @@ question (`QuestionBudgetUsd`, 12 dollars as deployed) and the nightly index reb
 uv run byeori deploy NoteModelId=global.anthropic.claude-sonnet-5 IndexRebuildSchedule="cron(0 3 * * ? *)"
 ```
 
-If the deploy fails, CloudFormation rolls back and leaves the previous state in place. Open
-CloudFormation → Stacks → your stack → Events in the console: the first `CREATE_FAILED` line says
-why. Fix the input and run the command again.
+These overrides are not remembered. The next plain `byeori deploy` puts back the values the
+deploy script passes, and this beta has no place in `.byeori.env` for lasting choices, so pass
+your `Key=Value` settings on every deploy.
+
+If the deploy fails, open CloudFormation → Stacks → your stack → Events in the console: the first
+`CREATE_FAILED` or `UPDATE_FAILED` line says why. A failed update rolls back to the previous state;
+fix the input and run the command again. A failed **first** create is different: it leaves the
+stack in `ROLLBACK_COMPLETE`, which cannot be updated, so delete it and wait for the delete to
+finish before you retry:
+
+```bash
+aws cloudformation delete-stack --stack-name <your stack name>
+aws cloudformation wait stack-delete-complete --stack-name <your stack name>
+uv run byeori deploy
+```
 
 ## 4. `byeori build-workers`
 
@@ -132,6 +149,9 @@ uv run byeori build-workers
 Builds the asset worker image with Docker (the program that cuts figures and tables out of a
 PDF), pushes it to the stack's ECR repository, and publishes the worker script to the bucket.
 The first build downloads several gigabytes and takes several minutes. Docker must be running.
+The image is built for `linux/arm64`, because the Fargate task runs on ARM (Graviton). An Apple
+Silicon Mac builds it natively; on an x86 Linux host Docker needs QEMU emulation registered
+through binfmt first (for example `docker run --privileged --rm tonistiigi/binfmt --install arm64`).
 
 No Docker on this machine? You can skip this step for now and come back to it later, from any
 machine that has Docker, by running `uv run byeori build-workers` again against the same
@@ -177,10 +197,10 @@ source .byeori.env
 uv run byeori upload-pdf <path to the PDF> --stem <author-year-words>
 ```
 
-(If you already know the paper's OpenAlex work id and would rather start from there: `uv run
-byeori search "<title of the paper>" --limit 5`, then `uv run byeori candidate-add <OpenAlex work
-id, for example W1234567890>`, which prints the record including its `stem`, then `uv run byeori
-attach-pdf <OpenAlex work id> <path to the PDF>` in place of `upload-pdf` above.)
+(If you would rather start from the paper's OpenAlex record: `uv run byeori search "<title of the
+paper>" --limit 5`, then `uv run byeori candidate-add <OpenAlex work id, for example
+W1234567890>`, which prints the record including its `stem`, then `uv run byeori upload-pdf <path
+to the PDF> --stem <that stem>`.)
 
 Extract its text with GROBID on Fargate, and check on the task (a few minutes):
 
@@ -195,19 +215,23 @@ Watch for two things here, both harmless on their own:
   `CannotPullContainerError` in the status output. That is expected if you skipped `build-workers`;
   extraction itself still finishes, and the note below is unaffected.
 - `aws-extract-status` may settle at `fulltext_ready_unclassified` instead of `fulltext_ready`.
-  That means GROBID read the PDF's text, but the automatic identity check — matching the title and
-  DOI it found against OpenAlex — could not settle which paper this is, so the pipeline parked it
-  rather than guess. This is common for commentaries, letters and papers with an unusual first
-  page; a straightforward research article with a clear title and a resolvable DOI almost always
-  reaches `fulltext_ready` on its own. If it stays at `fulltext_ready_unclassified`, the next
-  `aws-source-note` step fails with `has no extracted text yet (ingest_status
-  fulltext_ready_unclassified)` — a misleading message, since the text *is* there; only the
-  identity is unsettled. `uv run byeori resolve-ids --help` looks like the tool for this, but
-  reading it shows it requires a required path argument pointing at a separate local paper-notes
-  checkout to compare against, for a bulk migration this repository does not ship and a new
-  installer will not have — it is not a fix for a single unresolved upload. For your first paper,
-  the practical fix is simply to pick a different PDF — an ordinary journal article rather than a
-  commentary or a paper with a non-standard layout — and upload that instead.
+  The text was extracted, but the paper is parked: the pipeline will not write its note. There are
+  two causes.
+  - **The identity is not settled.** After extraction, Byeori matches the title and DOI it found
+    against OpenAlex to decide which paper this is. When nothing matches clearly (common for
+    commentaries, letters and papers with an unusual first page), it parks the paper rather than
+    guess. This beta has no per-paper fix for that: `uv run byeori resolve-ids` is a bulk
+    migration tool, not a repair for one upload. Pick an ordinary research article with a clear
+    title and DOI for your first paper.
+  - **The publisher or journal is refused.** The journal policy in
+    `src/byeori/policies/journals.json` lists refused houses under `denied_publishers` (MDPI and
+    Frontiers among them) and refused titles under `denied_journals`. To accept them, edit that
+    file (or replace it with your own) and run `uv run byeori deploy` again, since the functions
+    in AWS read the copy packaged with them. `BYEORI_JOURNAL_POLICY=<path>` points the commands
+    on your own computer at a different file.
+
+  While a paper is parked, `aws-source-note` fails with `has no extracted text yet (ingest_status
+  fulltext_ready_unclassified)`. The text is there; the message means the note cannot be written.
 
 Have Bedrock write the evidence note from the extracted full text:
 
@@ -227,8 +251,8 @@ uv run byeori wiki-read note <stem>
 
 `validate` only checks notes and syntheses — pages under `wiki/sources/`, `wiki/overviews/`,
 `wiki/concepts/` and `wiki/questions/` — never the catalog pages the index builder generates under
-`wiki/indexes/` or the lab's own question pages under `wiki/lab-questions/`. A clean first paper
-prints nothing and exits 0. A real failure looks like one line per missing section, naming the S3
+`wiki/indexes/` or the lab's own question pages under `wiki/lab-questions/`. A clean run prints
+`AWS validation passed for the published S3 wiki` and exits 0. A real failure looks like one line per missing section, naming the S3
 key and the heading, for example:
 
 ```
@@ -265,11 +289,13 @@ Then deploy the stack and register each member (the member's IAM user must exist
 
 ```bash
 uv run byeori deploy-lab
+source .byeori.env
 uv run python scripts/lab_members.py register --member-id <id> --iam-user <IAM user name> --role student --attach-policy
 uv run python scripts/lab_members.py outputs
 ```
 
-`outputs` prints `GatewayUrl`, the address members connect to.
+`deploy-lab` writes `LAB_STACK` into `.byeori.env`; sourcing it again before `lab_members.py` makes
+the script find the student stack. `outputs` prints `GatewayUrl`, the address members connect to.
 
 ## 8. Jev (optional)
 
@@ -301,7 +327,7 @@ prints the policy).
 is needed; `uvx` fetches the package:
 
 ```bash
-claude mcp add -s user byeori-lab -e LAB_FUNCTION_URL=<gateway url> -e AWS_REGION=<region> -e AWS_PROFILE=<profile> -- uvx --from git+https://github.com/joonan-lab/byeori byeori-lab-mcp
+claude mcp add -s user byeori-lab -e LAB_FUNCTION_URL=<gateway url> -e AWS_REGION=<region> -e AWS_PROFILE=<profile> -- uvx --from git+https://github.com/joonan-lab/byeori@v0.1.0-beta.1 byeori-lab-mcp
 ```
 
 For Codex, add to `~/.codex/config.toml`:
@@ -309,7 +335,7 @@ For Codex, add to `~/.codex/config.toml`:
 ```toml
 [mcp_servers.byeori-lab]
 command = "uvx"
-args = ["--from", "git+https://github.com/joonan-lab/byeori", "byeori-lab-mcp"]
+args = ["--from", "git+https://github.com/joonan-lab/byeori@v0.1.0-beta.1", "byeori-lab-mcp"]
 startup_timeout_sec = 60
 
 [mcp_servers.byeori-lab.env]
@@ -381,5 +407,6 @@ life. These stay, and keep costing their storage, until you remove them by hand:
 - **The parameters and the KMS key**: `aws ssm delete-parameter --name <name>` for each key you
   stored, and `aws kms schedule-key-deletion --key-id <key arn> --pending-window-in-days 7`. Never
   delete a Parameter Store parameter or the KMS key if another Byeori installation in this account
-  still uses it — the OpenAlex parameter and the Jev key are each named once per installation, but
-  a shared KMS key (`LAB_JEV_KMS_KEY_ARN`) can outlive any one of them.
+  still uses it. The OpenAlex parameter is named once per installation. The Jev parameter
+  `/byeori/jev/api-key` is one per account, never per installation, so every installation in the
+  account shares it, and a shared KMS key (`LAB_JEV_KMS_KEY_ARN`) can outlive any one of them.

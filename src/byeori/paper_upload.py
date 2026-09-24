@@ -38,9 +38,13 @@ def upload_one(settings: Settings, pdf: Path, *, stem: str | None = None, source
     """Store one PDF. ``stem`` names a file whose own name is not an llm-wiki stem (a publisher's
     ``PIIS0092867421013398.pdf`` in the user's Downloads), and ``source`` records where it came from;
     the file itself is only read, never renamed or moved."""
-    stem = stem or pdf.stem
-    if stem != pdf.stem and not STEM_PATTERN.fullmatch(stem):
-        raise ValueError(f"{stem!r} is not a lowercase llm-wiki stem")
+    if stem is None:
+        stem = pdf.stem
+        if not STEM_PATTERN.fullmatch(stem):
+            raise ValueError(f"the file name {pdf.name!r} is not a lowercase stem (a-z, 0-9, hyphens); "
+                             f"pass --stem author-year-words")
+    elif not STEM_PATTERN.fullmatch(stem):
+        raise ValueError(f"{stem!r} is not a lowercase stem (a-z, 0-9, hyphens, at least three characters)")
     digest = sha256_file(pdf)
     pdf_key, meta_key = f"papers/{stem}/original.pdf", f"papers/{stem}/meta.json"
     s3 = _s3()
@@ -58,7 +62,7 @@ def upload_one(settings: Settings, pdf: Path, *, stem: str | None = None, source
         s3.upload_file(str(pdf), settings.aws_bucket, pdf_key,
                        ExtraArgs={"ContentType": "application/pdf", "Metadata": {"sha256": digest, "stem": stem}})
     meta = {"stem": stem, "pdf_key": pdf_key, "pdf_sha256": digest, "pdf_bytes": pdf.stat().st_size,
-            "local_pdf": str(pdf), "source": source, "source_collection": source, "id_kind": "stem",
+            "source": source, "source_collection": source, "id_kind": "stem",
             "uploaded_at": datetime.now(UTC).replace(microsecond=0).isoformat()}
     # An original already stored with these bytes may carry what later steps merged in (identity,
     # journal verdict from backfill_to_s3_identity.py), so its existing keys win and only gaps are filled.
@@ -69,7 +73,7 @@ def upload_one(settings: Settings, pdf: Path, *, stem: str | None = None, source
         s3.put_object(Bucket=settings.aws_bucket, Key=meta_key, ContentType="application/json",
                       Body=json.dumps(merged, ensure_ascii=False, indent=2).encode("utf-8"))
     if settings.aws_table:
-        item = {key: value for key, value in meta.items() if key != "local_pdf"}
+        item = dict(meta)
         names = {f"#f{index}": key for index, key in enumerate(item)}
         values = {f":v{index}": value for index, value in enumerate(item.values())}
         names["#st"], values[":status"] = "ingest_status", "pdf_uploaded"

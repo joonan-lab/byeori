@@ -352,3 +352,24 @@ def test_command_deploy_does_not_bootstrap_a_bucket_when_the_env_file_already_ha
 
     assert code == 0
     assert captured["env"]["AWS_KIRO_WIKI_BUCKET"] == "byeori-data-111122223333"
+
+
+def test_prompt_without_a_terminal_names_the_non_interactive_form(monkeypatch):
+    def no_terminal(_prompt):
+        raise EOFError
+    monkeypatch.setattr("builtins.input", no_terminal)
+    with pytest.raises(RuntimeError, match="init --non-interactive --set KEY=VALUE"):
+        installer.prompt_on_terminal("AWS_PROFILE", "byeori")
+
+
+def test_init_without_a_terminal_prints_a_clean_error(tmp_path, monkeypatch, capsys):
+    def no_terminal(_prompt):
+        raise EOFError
+    monkeypatch.setattr("builtins.input", no_terminal)
+    monkeypatch.setattr(sys, "argv", ["byeori", "init", "--env-file", str(tmp_path / ".env")])
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main()
+    assert excinfo.value.code == 2
+    err = capsys.readouterr().err
+    assert err.startswith("error: no terminal for questions")
+    assert "Traceback" not in err

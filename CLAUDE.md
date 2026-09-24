@@ -19,7 +19,7 @@ infrastructure by hand or call `aws cloudformation create-stack` yourself: the t
 - Application functions (search, extraction, validation, indexing, ingestion, synthesis) run in AWS. The client authenticates, submits and reads bounded results. Do not move a function to the laptop or download the index to answer a small request.
 - The wiki lives in S3 and only there. Keep no local copy of PDFs, extractions, pages or the index; there is no local mirror to sync.
 - A page needs the paper's full text read from the stored original. Metadata, an abstract or a landing-page snippet is never enough. Record limitations and the line between reported results and interpretation.
-- Preserve every original: upload, never move or overwrite, never delete objects in bulk, never run a destructive sync, never disable the bucket's versioning or the audit trail.
+- Preserve every original: upload, never move or overwrite, never delete objects in bulk, never run a destructive sync, never disable the audit trail, and never weaken the bucket policy if `infra/storage-protection.yaml` was applied.
 - Secrets live in Parameter Store, read by the Lambdas under their roles. Do not put a key in a
   file, a log or a shell history, and do not call a model from the laptop.
 - Deploy with the release's commands. A deploy that fails leaves the previous settings in place;

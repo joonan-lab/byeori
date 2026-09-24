@@ -42,9 +42,11 @@ pdf_sha256: ""
 
 What it costs, measured by one lab at Bedrock list prices (details in `docs/COST.md`):
 
-- **Per paper:** about $0.135 for the note on Claude Opus 5 ($0.055 on Sonnet 5), plus about $0.02 for extraction and lookups.
+- **Per paper:** about $0.30 for the note on Claude Opus 5 at the shipped settings (`IngestReasoning=high`),
+  or about $0.135 at `default` reasoning ($0.055 on Sonnet 5), plus about $0.02 for extraction and lookups.
 - **Per question:** about $2.21 for a research question (median of six), about $0.25 for a student answer.
-- **Idle month:** S3 storage by size (about $0.023 per GB-month), $1 per KMS key if the optional Jev triage is on, everything else near zero.
+- **Idle month:** S3 storage by size (about $0.023 per GB-month), $1 per KMS key if you install the optional
+  student service or Jev triage, everything else near zero.
 
 ## The AWS services Byeori uses, and why
 
@@ -115,7 +117,9 @@ so no key sits in a file on anyone's computer. Idle cost: free (standard paramet
 
 ### KMS
 
-Key Management Service holds encryption keys. One key you create encrypts the Jev parameter.
+Key Management Service holds encryption keys. One key you create encrypts the Jev parameter, and
+the optional student stack needs that key even if you never use Jev, because its template takes the
+key's ARN. Without the student service or Jev you need no key.
 Idle cost: $1 per key-month.
 
 ### CloudFormation
@@ -157,7 +161,9 @@ git clone https://github.com/joonan-lab/byeori
 cd byeori
 uv sync
 uv run byeori init
+source .byeori.env
 uv run byeori deploy
+source .byeori.env
 uv run byeori build-workers
 uv run byeori doctor
 ```
@@ -175,6 +181,12 @@ is created. Either way, follow `docs/INSTALL.md`; it has the steps these command
   in `docs/INSTALL.md`.
 - The student question service (`docs/LAB-SERVICE.md`) has been run by one lab only.
 - The costs are one lab's measurements, not a promise.
+- When a paper's identity cannot be resolved (OpenAlex has no matching record), there is no
+  user-side fix in this beta; the paper stays parked.
+- `byeori build-workers` was not exercised in this release's verification: the verifying machine
+  had no Docker.
+- The student-facing offer messages, the lab-question page headings and the `byeori-lab` setup
+  text are in Korean.
 
 ## Where it came from
 

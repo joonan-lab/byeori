@@ -21,12 +21,18 @@ Follow `docs/INSTALL.md`; its ten steps are the checklist. At each step:
 
 - Prerequisites check: `aws --version`, `uv --version`, `docker --version`,
   `aws sts get-caller-identity --profile <profile>`; Bedrock model access is checked later by `doctor`.
-- `byeori init` : asks for the profile, region, stack name, the Parameter Store name for the
-  OpenAlex key, and whether the stack should create its own network. Writes `.byeori.env`.
-- Put the OpenAlex key in Parameter Store (the document gives the `aws ssm put-parameter` line;
-  the person pastes their own key; never ask them to paste it into the chat).
-- `byeori deploy` : creates the main stack. Ten to fifteen minutes. Explain the stack's parts as
-  the events scroll: bucket, table, functions, cluster, workflows, audit trail.
+- `byeori init` : its interactive prompts need a terminal, which you do not have. Collect the
+  answers in chat instead: the AWS CLI profile, the region, the stack name, the Parameter Store
+  name for the OpenAlex key, the contact e-mail (may be empty), whether the stack should create
+  its own network, and, when it should not, the VPC id and the comma-separated public subnet ids.
+  Then run `byeori init --non-interactive --set KEY=VALUE ...` with those answers
+  (`docs/INSTALL.md` step 2 names the keys). Writes `.byeori.env`; `source .byeori.env` after it.
+- Put the OpenAlex key in Parameter Store (the document gives the `read -rs KEY` and
+  `aws ssm put-parameter` lines; the person runs them in their own terminal and pastes their own
+  key; never ask them to paste it into the chat).
+- `byeori deploy` : creates the main stack. A few minutes. Explain the stack's parts as the
+  events scroll: bucket, table, functions, cluster, workflows, audit trail. `source .byeori.env`
+  after it. A failed first create must be deleted before a retry (`docs/INSTALL.md` step 3).
 - `byeori build-workers` : builds the asset worker image with Docker and pushes it. Needs Docker
   running. Several minutes the first time.
 - `byeori doctor` : checks the profile, the outputs, Bedrock access for every configured model,

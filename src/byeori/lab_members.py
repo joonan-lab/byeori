@@ -30,6 +30,15 @@ from .lab_store import Delete, Put, TablePort, Update, keys, new_item, now_iso
 
 DEFAULT_STACK = "byeori-lab"
 
+
+def lab_stack_name(environ: Mapping[str, str]) -> str:
+    """``LAB_STACK``, else ``{KIRO_WIKI_STACK}-lab`` (what ``deploy-lab`` names it), else byeori-lab."""
+    if environ.get("LAB_STACK"):
+        return environ["LAB_STACK"]
+    if environ.get("KIRO_WIKI_STACK"):
+        return f"{environ['KIRO_WIKI_STACK']}-lab"
+    return DEFAULT_STACK
+
 # Partition that lists every registered member: one row per member, sk = member_id.
 MEMBERS_INDEX = "MEMBERS"
 

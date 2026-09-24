@@ -45,11 +45,19 @@ aws kms create-key --description "byeori parameters"
 aws kms create-alias --alias-name alias/byeori-parameters --target-key-id <KeyId from the output>
 ```
 
-Then store the Jev key under its fixed name, encrypted with that key:
+Then store the Jev key under its fixed name, encrypted with that key. `read -rs` asks for the key
+without showing it or leaving it in your shell history; paste it when the cursor waits and press
+Enter:
 
 ```bash
-aws ssm put-parameter --name /byeori/jev/api-key --type SecureString --key-id <key arn> --value <your Jev key>
+read -rs KEY
+aws ssm put-parameter --name /byeori/jev/api-key --type SecureString --key-id <key arn> --value "$KEY"
+unset KEY
 ```
+
+There is one Jev key per account, never one per installation: every Byeori installation in the
+account reads the same `/byeori/jev/api-key`. If another installation already stored it, skip this
+step.
 
 Why the name is fixed: the student stack's `JevApiKeyParameter` accepts only `/byeori/jev/api-key`,
 and the triage worker's role may read that one parameter and nothing else. A fixed name means no
@@ -87,16 +95,17 @@ source .byeori.env
 uv run byeori deploy-jev-eval
 ```
 
-This defaults the stack's name to `JEV_EVAL_STACK`, `<your KIRO_WIKI_STACK>-jev`, and records it
-in `.byeori.env` the first time you run it — if you administer more than one Byeori installation
-in this account, each needs its own Jev evaluation stack name, so do not reuse one; set
-`JEV_EVAL_STACK` yourself beforehand to pick a different name. (The underlying script,
-`scripts/deploy_jev_eval.sh`, still works directly if you prefer; it reads the same
-`JEV_EVAL_STACK` variable and defaults it the same way.)
+The command names the stack `<your KIRO_WIKI_STACK>-jev` and records that name as
+`JEV_EVAL_STACK` in `.byeori.env` the first time you run it. If you administer more than one
+Byeori installation in this account, each needs its own evaluation stack name, so do not reuse
+one; set `JEV_EVAL_STACK` yourself beforehand to pick a different name. The underlying script,
+`scripts/deploy_jev_eval.sh`, reads the same variable, but run on its own without it the script
+names the stack `byeori-jev-eval`.
 
-Then make one call. The function is named after its stack:
+Load the recorded name, then make one call. The function is named after its stack:
 
 ```bash
+source .byeori.env
 aws lambda invoke --function-name "$JEV_EVAL_STACK" --cli-binary-format raw-in-base64-out \
   --payload '{"action": "smoke"}' jev-smoke.json
 cat jev-smoke.json
@@ -113,7 +122,9 @@ without calling Jev. Neither result ever contains the key. Delete the stack when
 To rotate the key, issue a new one at TypeSafe and put it as a new version of the same parameter:
 
 ```bash
-aws ssm put-parameter --name /byeori/jev/api-key --type SecureString --key-id <key arn> --value <new key> --overwrite
+read -rs KEY
+aws ssm put-parameter --name /byeori/jev/api-key --type SecureString --key-id <key arn> --value "$KEY" --overwrite
+unset KEY
 ```
 
 The worker reads the parameter on every call and always gets the latest version, so nothing needs

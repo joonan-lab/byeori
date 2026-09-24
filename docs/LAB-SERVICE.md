@@ -39,7 +39,8 @@ Each member signs in with their own IAM user in the lab's AWS account.
 
    Give the key pair to the member privately. Never paste it into a chat or a file in a repository.
 2. **Register the member and attach the student policy**, from your clone with `.byeori.env`
-   sourced:
+   sourced. The script finds the student stack by `LAB_STACK` (which `byeori deploy-lab` writes
+   into `.byeori.env`), else by `<your KIRO_WIKI_STACK>-lab`:
 
    ```bash
    uv run python scripts/lab_members.py register --member-id <id> --iam-user <name> --role student --attach-policy
@@ -64,7 +65,7 @@ Nothing else is installed or configured; no bucket, table or function name is ne
 Claude Code:
 
 ```bash
-claude mcp add -s user byeori-lab -e LAB_FUNCTION_URL=<gateway url> -e AWS_REGION=<region> -e AWS_PROFILE=<profile> -- uvx --from git+https://github.com/joonan-lab/byeori byeori-lab-mcp
+claude mcp add -s user byeori-lab -e LAB_FUNCTION_URL=<gateway url> -e AWS_REGION=<region> -e AWS_PROFILE=<profile> -- uvx --from git+https://github.com/joonan-lab/byeori@v0.1.0-beta.1 byeori-lab-mcp
 ```
 
 Codex (`~/.codex/config.toml`):
@@ -72,7 +73,7 @@ Codex (`~/.codex/config.toml`):
 ```toml
 [mcp_servers.byeori-lab]
 command = "uvx"
-args = ["--from", "git+https://github.com/joonan-lab/byeori", "byeori-lab-mcp"]
+args = ["--from", "git+https://github.com/joonan-lab/byeori@v0.1.0-beta.1", "byeori-lab-mcp"]
 startup_timeout_sec = 60
 
 [mcp_servers.byeori-lab.env]

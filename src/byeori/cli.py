@@ -824,7 +824,7 @@ def build_parser() -> argparse.ArgumentParser:
         "upload-pdf",
         help="store one PDF as papers/{stem}/original.pdf with meta.json and a catalog item, ready for aws-extract")
     upload_pdf_parser.add_argument("pdf")
-    upload_pdf_parser.add_argument("--stem", help="lowercase author-year-words stem; defaults to the file's own name")
+    upload_pdf_parser.add_argument("--stem", help="lowercase author-year-words stem; defaults to the file's own name, which must then be one")
     upload_pdf_parser.add_argument("--source", help="where the PDF came from (default: upload-pdf)")
     upload_pdf_parser.set_defaults(handler=command_upload_pdf)
 

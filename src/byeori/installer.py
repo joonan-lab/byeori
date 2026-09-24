@@ -76,7 +76,11 @@ def ask_settings(ask: Callable[[str, str], str], existing: dict[str, str]) -> di
 
 def prompt_on_terminal(key: str, default: str) -> str:
     prompt = next(p for k, p, _d in QUESTIONS + VPC_QUESTIONS if k == key)
-    answer = input(f"{prompt} [{default}]: ")
+    try:
+        answer = input(f"{prompt} [{default}]: ")
+    except EOFError:
+        raise RuntimeError(
+            "no terminal for questions; run `init --non-interactive --set KEY=VALUE ...`") from None
     return answer or default
 
 

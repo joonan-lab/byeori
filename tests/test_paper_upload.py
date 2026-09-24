@@ -86,3 +86,20 @@ def test_different_bytes_under_the_same_stem_are_a_conflict_and_write_nothing(cl
 def test_a_stem_that_is_not_a_lowercase_stem_raises_value_error(cloud, pdf):
     with pytest.raises(ValueError):
         paper_upload.upload_one(Settings.from_env(), pdf, stem="Not_A_Lowercase_Stem", source="upload-pdf")
+
+
+def test_a_file_name_that_is_not_a_stem_needs_stem(cloud, tmp_path):
+    odd = tmp_path / "My Paper.pdf"
+    odd.write_bytes(b"%PDF-1.4 odd name")
+    with pytest.raises(ValueError, match="--stem"):
+        paper_upload.upload_one(Settings.from_env(), odd, source="upload-pdf")
+    assert cloud.objects == {} or not any(key.startswith("papers/") for key in cloud.objects)
+    result = paper_upload.upload_one(Settings.from_env(), odd, stem="doe-2024-odd-name", source="upload-pdf")
+    assert result["state"] == "uploaded"
+
+
+def test_meta_json_does_not_record_the_uploaders_local_path(cloud, pdf):
+    paper_upload.upload_one(Settings.from_env(), pdf, source="upload-pdf")
+    meta = json.loads(cloud.objects[META_KEY])
+    assert "local_pdf" not in meta
+    assert str(pdf.parent) not in json.dumps(meta)

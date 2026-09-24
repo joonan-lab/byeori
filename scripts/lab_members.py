@@ -24,8 +24,8 @@ Onboarding order for one student:
 Later: ``deactivate --member-id ID`` makes the gateway refuse the member without deleting the
 rows; ``activate`` reverses it; ``list`` prints every registered member.
 
-Environment: ``AWS_REGION`` (required; source the env file first) and ``LAB_STACK`` (default
-byeori-lab). The control table name and the two policy ARNs come from the stack outputs. Every
+Environment: ``AWS_REGION`` (required; source the env file first) and ``LAB_STACK`` (else
+``{KIRO_WIKI_STACK}-lab`` when ``KIRO_WIKI_STACK`` is set, else byeori-lab). The control table name and the two policy ARNs come from the stack outputs. Every
 subcommand prints one JSON summary to stdout; failures print ``{"ok": false, ...}`` to stderr and
 exit 2.
 """
@@ -116,7 +116,7 @@ def main(argv: list[str] | None = None) -> int:
     if not region:
         print("error: set AWS_REGION (source the env file first)", file=sys.stderr)
         return 2
-    stack = os.environ.get("LAB_STACK") or lab_members.DEFAULT_STACK
+    stack = lab_members.lab_stack_name(os.environ)
     try:
         session = boto3.Session(region_name=region)
         outputs = lab_members.stack_policy_arns(session.client("cloudformation"), stack_name=stack)

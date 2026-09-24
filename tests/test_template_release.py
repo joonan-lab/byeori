@@ -49,6 +49,7 @@ def test_rule_refuses_an_empty_vpc_unless_the_stack_creates_one():
     rule = TEMPLATE["Rules"]["VpcGivenOrCreated"]
     assert rule["RuleCondition"] == {"Equals": [{"Ref": "CreateVpc"}, "false"]}
     assert rule["Assertions"][0]["Assert"] == {"Not": [{"Equals": [{"Ref": "VpcId"}, ""]}]}
+    assert rule["Assertions"][1]["Assert"] == {"Not": [{"Contains": [{"Ref": "ExtractionSubnets"}, ""]}]}
 
 
 def test_own_vpc_resources_exist_only_when_asked():
@@ -73,3 +74,14 @@ def test_deploy_scripts_pass_the_values_from_the_environment():
         assert line in deploy
     build = (ROOT / "scripts/build_asset_image.sh").read_text(encoding="utf-8")
     assert 'REGION="${AWS_REGION:?set AWS_REGION' in build
+    assert "docker build --platform linux/arm64" in build
+
+
+def test_deploy_checks_origin_main_and_contact_only_in_lab_mode():
+    deploy = (ROOT / "scripts/deploy.sh").read_text(encoding="utf-8")
+    guard = deploy.index('if [ "${KIRO_WIKI_REQUIRE_ORIGIN_MAIN:-}" = "1" ]; then')
+    end = deploy.index("\nfi\n", guard)
+    block = deploy[guard:end]
+    assert "git merge-base --is-ancestor origin/main HEAD" in block
+    assert ': "${KIRO_WIKI_CONTACT_EMAIL:?' in block
+    assert deploy.count("git fetch") == 1 and deploy.index("git fetch") > guard

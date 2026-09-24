@@ -32,12 +32,18 @@ if [ "${KIRO_WIKI_CREATE_VPC:-false}" != "true" ]; then
   : "${KIRO_WIKI_VPC_ID:?set KIRO_WIKI_VPC_ID and KIRO_WIKI_SUBNET_IDS, or KIRO_WIKI_CREATE_VPC=true}"
   : "${KIRO_WIKI_SUBNET_IDS:?set KIRO_WIKI_SUBNET_IDS (comma-separated public subnet ids)}"
 fi
-# The stack packages this working tree, so a tree missing another machine's pushed commits removes
-# their code from the Lambdas. On 2026-09-23 two Macs did this to each other within an hour.
-git fetch --quiet origin
-if ! git merge-base --is-ancestor origin/main HEAD; then
-  echo "deploy.sh: this tree lacks commits already on origin/main; merge them before deploying" >&2
-  exit 1
+# Lab mode (KIRO_WIKI_REQUIRE_ORIGIN_MAIN=1, set in the lab's env file): the stack packages this
+# working tree, so a tree missing another machine's pushed commits removes their code from the
+# Lambdas. On 2026-09-23 two Macs did this to each other within an hour. The same mode refuses an
+# empty contact address, so a deploy from a stale env file cannot drop the lab's polite-pool e-mail.
+# A standalone install has no origin/main to compare with and skips both checks.
+if [ "${KIRO_WIKI_REQUIRE_ORIGIN_MAIN:-}" = "1" ]; then
+  : "${KIRO_WIKI_CONTACT_EMAIL:?lab mode needs KIRO_WIKI_CONTACT_EMAIL; source .byeori.env first}"
+  git fetch --quiet origin
+  if ! git merge-base --is-ancestor origin/main HEAD; then
+    echo "deploy.sh: this tree lacks commits already on origin/main; merge them before deploying" >&2
+    exit 1
+  fi
 fi
 packaged="state/packaged-template.yaml"
 aws cloudformation package \
