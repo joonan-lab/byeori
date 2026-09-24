@@ -7,29 +7,22 @@ search index over all the pages is rebuilt in AWS, and a question service answer
 with citations. Every page records where it came from: the paper's identifiers, the hash of the
 stored PDF, and the model that wrote it. This release is a public **beta**.
 
-An evidence note starts like this (from `templates/source.md`):
+An evidence note has these sections, in this order. Section 1 is filled from the catalog; the
+rest are written by the model from the paper's full text, and a note that lacks any of them is
+refused, not published.
 
 ```markdown
----
-work_id: ""
-doi: ""
-title: ""
-pdf_path: ""
-pdf_sha256: ""
----
+## 1. Document Information
+| Field | Details |
+| ... | title, authors, journal, year, DOI, the stored PDF's SHA-256, the model that wrote the note |
 
-# Paper title
-
-## Citation
-
-## Methods
-
-## Results
-
-## Limitations
-
-## Evidence boundary
-
+## One-line Summary
+## 2. Key Contributions
+## 3. Methodology and Architecture
+## 4. Key Results and Benchmarks
+## 5. Limitations and Future Work
+## 6. Related Work
+## 7. Glossary
 ```
 
 ## What the wiki holds, layer by layer
