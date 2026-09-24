@@ -154,6 +154,142 @@ flowchart LR
     events[EventBridge] --> lambda
 ```
 
+## How it works, in diagrams
+
+Short versions; `docs/ARCHITECTURE.md` has the detailed diagram for each, under the same
+headings, and the IAM write boundaries.
+
+### Overall architecture
+
+```mermaid
+flowchart LR
+    admin["byeori CLI or byeori-mcp: administrator"] --> ingest["Ingest function"]
+    admin -->|"start a run"| sfn["Step Functions: Notes, OpenAlexMatch, Synthesis, Question"]
+    admin -->|"upload-pdf"| papers["papers/"]
+    admin -->|"aws-extract"| fargate["Fargate: GROBID extraction, figure cutting"]
+    sfn --> ingest
+    sfn --> synth["Synthesis function"]
+    events["EventBridge: nightly rebuild, new extraction"] --> ingest
+    events --> fargate
+    fargate --> papers
+    ingest --> wiki["wiki/sources/, wiki/questions/, wiki/indexes/"]
+    ingest -->|"build_index"| index["index/"]
+    ingest --> ddb[("Catalog table")]
+    synth --> synthpages["wiki/overviews/, wiki/concepts/"]
+    ingest --> bedrock["Bedrock: Claude"]
+    synth --> bedrock
+    member["byeori-lab-mcp: lab member"] --> gateway["Student stack: gateway, queues, workers, control table"]
+    gateway -.->|"reads"| index
+    gateway -->|"answers only"| labq["wiki/lab-questions/"]
+    gateway -->|"approved research only"| synthpages
+    gateway --> bedrock
+```
+
+### Ingesting a paper
+
+```mermaid
+flowchart TB
+    pdf["PDF: byeori upload-pdf"] --> orig["papers/{stem}/original.pdf, status pdf_uploaded"]
+    orig -->|"byeori aws-extract"| grobid["Fargate: GROBID + worker"]
+    grobid --> clean["papers/{stem}/clean.md"]
+    grobid -->|"on error"| failed["extract_failed"]
+    clean -->|"EventBridge"| identity["resolve_identity at OpenAlex"]
+    clean -->|"EventBridge"| assets["Fargate: figures and tables"]
+    identity -->|"verified"| ready["fulltext_ready"]
+    clean -->|"journal included"| ready
+    clean -->|"otherwise"| parked["fulltext_ready_unclassified"]
+    parked --> identity
+    ready -->|"default: aws-source-note, aws-notes-run"| bedrock["Bedrock writes the note in AWS"]
+    ready -->|"on request: aws-read-extraction"| session["A Claude Code session writes the note"]
+    session -->|"aws-publish-source-note"| check["Section check and frontmatter in AWS, ingest_harness claude-code"]
+    bedrock --> note["wiki/sources/{stem}.md"]
+    check --> note
+    discovery["OpenAlex: search, candidate-add, aws-ingest-candidate"] --> draft["wiki/drafts/, model_draft"]
+    draft -->|"promote-draft"| note
+    note -->|"next index rebuild"| index["index/"]
+```
+
+### Synthesis
+
+```mermaid
+flowchart LR
+    run["byeori aws-synthesis-run"] --> plan["Plan: subtopics per category, concepts from 5 or more notes"]
+    notes["Ready notes"] -.-> plan
+    plan --> manifests["runs/synthesis/ manifests"]
+    manifests --> pages["Write pages in parallel, at most SynthesisMaxPages"]
+    index["index/"] -.-> pages
+    pages --> bedrock["Bedrock, fallback model if declined"]
+    pages --> concepts["wiki/concepts/{slug}.md"]
+    pages --> subtopics["wiki/overviews/{category}/{subtopic}.md"]
+    subtopics --> category["wiki/overviews/{category}/index.md"]
+    category --> rebuild["build_index"]
+```
+
+Notes are not rewritten by synthesis; which pages cite a note comes from the index's links table.
+
+### A member's question
+
+```mermaid
+sequenceDiagram
+    participant M as Member agent
+    participant G as Gateway
+    participant A as Answer worker
+    participant T as Triage worker and Jev
+    participant R as Research worker
+    M->>G: ask_byeori
+    G-->>M: job_id
+    G->>A: job through SQS
+    A->>A: BM25 over index/, evidence packet, Bedrock
+    A->>A: writes wiki/lab-questions/{period}/{job}.md
+    M->>G: get_byeori_answer
+    G-->>M: answer with citations
+    A->>T: triage, after the answer
+    T->>T: offer recorded when review_candidate >= 0.99
+    M->>G: get_byeori_answer shows the offer
+    M->>G: respond_to_synthesis_offer, only on an explicit yes
+    G->>R: approved research run
+    R->>R: scoped page edits, index_pending until the next rebuild
+```
+
+### The nightly index rebuild
+
+```mermaid
+flowchart LR
+    timer["EventBridge schedule"] --> build["build_index"]
+    cli["byeori build-index"] --> build
+    build -->|"skips wiki/indexes/ and wiki/lab-questions/"| index["index/"]
+    build --> catalogs["wiki/indexes/{folder}.md"]
+```
+
+### OpenAlex matching
+
+```mermaid
+flowchart LR
+    cli["byeori aws-openalex-match"] --> sm["OpenAlexMatch workflow"]
+    sm --> batch["50 DOIs per request"]
+    batch --> catalog[("Catalog: openalex_ fields")]
+    batch -->|"not done"| wait["Wait out the rate limit"]
+    wait --> batch
+```
+
+### The administrator's research question
+
+```mermaid
+flowchart LR
+    ask["byeori aws-answer or answer_wiki_question"] --> loop["Research loop in the ingest function, under QuestionBudgetUsd"]
+    list["Question workflow: a list of questions"] --> loop
+    loop --> bedrock["Bedrock"]
+    loop --> edits["New or revised notes, concepts, overviews"]
+    loop --> page["wiki/questions/{slug}.md"]
+```
+
+### Other flows
+
+- `byeori aws-build-category-catalogs` writes one browse catalog per field under
+  `wiki/indexes/categories/`.
+- Supplementary files sit in `papers/{stem}/supplementary/` and are read with `read_supplementary`.
+- Every run leaves its receipt under `runs/`; `byeori cost-ledger` sums a local estimate.
+
 ## Install
 
 ```bash
